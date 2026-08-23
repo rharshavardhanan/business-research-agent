@@ -1,0 +1,17 @@
+# Secrets
+.env
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# Local lead data — never committed.
+# Ignore the whole directory, not `data/*.xlsx`: that pattern misses
+# subdirectories, and `data/.trash/` holds deleted workbooks full of real leads.
+# `data/*` not `data/`: git cannot re-include a file whose parent directory is
+# excluded, so the .gitkeep would be unreachable.
+data/*
+!data/.gitkeep

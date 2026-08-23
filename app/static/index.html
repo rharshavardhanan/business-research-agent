@@ -1,0 +1,1369 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Business Research Agent</title>
+<style>
+  :root {
+    --bg:            #f7f7f6;
+    --surface:       #ffffff;
+    --line:          #e2e1de;
+    --line-strong:   #cfcec9;
+    --text:          #1a1a18;
+    --text-muted:    #63625d;
+    --text-faint:    #8b8a84;
+    --accent:        #2f4bd8;
+    --accent-hover:  #2439ad;
+    --accent-soft:   #eef0fd;
+    --new-fg:        #1c6b3f;
+    --new-bg:        #e6f4ec;
+    --new-line:      #b6ddc7;
+    --existing-fg:   #63625d;
+    --existing-bg:   #efeeec;
+    --existing-line: #dbdad6;
+    --updated-fg:    #1d4f8c;
+    --updated-bg:    #e8f0fa;
+    --updated-line:  #bcd5ee;
+    --review-fg:     #8a5510;
+    --review-bg:     #fbf0dd;
+    --review-line:   #ecd4a5;
+    --danger-fg:     #9b2226;
+    --danger-bg:     #fbeaea;
+    --danger-line:   #eec4c4;
+    --radius:        10px;
+    --shadow:        0 1px 2px rgba(20,19,17,.05), 0 6px 16px -8px rgba(20,19,17,.18);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:            #16161a;
+      --surface:       #1e1e23;
+      --line:          #2f2f37;
+      --line-strong:   #3d3d47;
+      --text:          #ecebe8;
+      --text-muted:    #a3a29c;
+      --text-faint:    #7c7b75;
+      --accent:        #8b9cff;
+      --accent-hover:  #a4b1ff;
+      --accent-soft:   #23253a;
+      --new-fg:        #7fd3a3;
+      --new-bg:        #17301f;
+      --new-line:      #2a5238;
+      --existing-fg:   #a3a29c;
+      --existing-bg:   #26262c;
+      --existing-line: #37373f;
+      --updated-fg:    #8fb8ec;
+      --updated-bg:    #172433;
+      --updated-line:  #2a4260;
+      --review-fg:     #e0b263;
+      --review-bg:     #322614;
+      --review-line:   #574325;
+      --danger-fg:     #eb8c8c;
+      --danger-bg:     #331a1a;
+      --danger-line:   #573030;
+      --shadow:        0 1px 2px rgba(0,0,0,.35), 0 6px 18px -8px rgba(0,0,0,.55);
+    }
+  }
+
+  * { box-sizing: border-box; }
+
+  html { -webkit-text-size-adjust: 100%; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 400 15px/1.5 ui-sans-serif, -apple-system, "Segoe UI", Roboto,
+          "Helvetica Neue", Arial, sans-serif;
+    font-feature-settings: "tnum" 1;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .layout {
+    display: grid;
+    grid-template-columns: 262px minmax(0, 1fr);
+    gap: 32px;
+    max-width: 1500px;
+    margin: 0 auto;
+    padding: 40px 28px 140px;
+    align-items: start;
+  }
+
+  .shell { min-width: 0; }
+
+  /* ---------- sidebar ---------- */
+
+  .sidebar {
+    position: sticky;
+    top: 40px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    overflow: hidden;
+  }
+
+  .sidebar-head {
+    display: flex; align-items: center; gap: 6px;
+    padding: 12px 12px 12px 16px;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .sidebar-head h2 {
+    flex: 1;
+    margin: 0;
+    font-size: 11.5px;
+    font-weight: 600;
+    letter-spacing: .05em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+  }
+
+  .iconbtn {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 26px; height: 26px;
+    padding: 0;
+    color: var(--text-muted);
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 7px;
+  }
+  .iconbtn:hover { color: var(--text); background: var(--bg); border-color: var(--line); }
+  .iconbtn svg { width: 15px; height: 15px; }
+
+  .tree { padding: 8px; max-height: 62vh; overflow-y: auto; }
+
+  .tree ul { list-style: none; margin: 0; padding: 0 0 0 13px; }
+  .tree > ul { padding-left: 0; }
+
+  .node {
+    display: flex; align-items: center; gap: 7px;
+    width: 100%;
+    padding: 6px 8px;
+    font: inherit;
+    font-size: 13.5px;
+    text-align: left;
+    color: var(--text);
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 7px;
+    cursor: pointer;
+  }
+  .node:hover { background: var(--bg); }
+  .node svg { width: 15px; height: 15px; flex: none; color: var(--text-faint); }
+  .node .label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  .node[aria-current="true"] {
+    color: var(--accent);
+    background: var(--accent-soft);
+    font-weight: 500;
+  }
+  .node[aria-current="true"] svg { color: var(--accent); }
+
+  .row { display: flex; align-items: center; }
+  .row .actions { display: flex; gap: 1px; opacity: 0; padding-right: 4px; }
+  .row:hover .actions,
+  .row:focus-within .actions { opacity: 1; }
+  .actions .iconbtn { width: 24px; height: 24px; }
+  .actions .iconbtn svg { width: 13px; height: 13px; }
+  .actions .danger:hover { color: var(--danger-fg); border-color: var(--danger-line); background: var(--danger-bg); }
+
+  details > summary { list-style: none; }
+  details > summary::-webkit-details-marker { display: none; }
+  details[open] > summary > .row .chev { transform: rotate(90deg); }
+  .chev { transition: transform .15s ease; }
+
+  .tree-empty { padding: 16px; font-size: 13px; color: var(--text-faint); }
+
+  @media (max-width: 900px) {
+    .layout { grid-template-columns: minmax(0, 1fr); gap: 18px; padding: 28px 16px 150px; }
+    .sidebar { position: static; }
+    .tree { max-height: 40vh; }
+  }
+
+  /* ---------- header ---------- */
+
+  header { margin-bottom: 32px; }
+
+  h1 {
+    margin: 0 0 6px;
+    font-size: 22px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+  }
+
+  .subtitle { margin: 0; color: var(--text-muted); font-size: 14px; }
+
+  /* ---------- command bar ---------- */
+
+  form { display: flex; gap: 10px; margin-bottom: 14px; }
+
+  .field { position: relative; flex: 1; }
+
+  .field svg {
+    position: absolute;
+    left: 14px; top: 50%;
+    width: 17px; height: 17px;
+    margin-top: -8.5px;
+    color: var(--text-faint);
+    pointer-events: none;
+  }
+
+  input[type=text] {
+    width: 100%;
+    padding: 13px 16px 13px 41px;
+    font: inherit;
+    color: var(--text);
+    background: var(--surface);
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius);
+    transition: border-color .15s, box-shadow .15s;
+  }
+
+  input[type=text]::placeholder { color: var(--text-faint); }
+
+  input[type=text]:focus-visible {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+  }
+
+  button {
+    font: inherit;
+    font-weight: 500;
+    border-radius: var(--radius);
+    border: 1px solid transparent;
+    cursor: pointer;
+    transition: background-color .15s, border-color .15s, color .15s;
+  }
+
+  button:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  .primary {
+    padding: 13px 22px;
+    color: #fff;
+    background: var(--accent);
+    white-space: nowrap;
+  }
+  .primary:hover:not(:disabled) { background: var(--accent-hover); }
+
+  @media (prefers-color-scheme: dark) {
+    .primary { color: #11121b; }
+  }
+
+  button:disabled { opacity: .45; cursor: not-allowed; }
+
+  .examples {
+    display: flex; flex-wrap: wrap; gap: 6px;
+    margin-bottom: 26px;
+  }
+
+  .example {
+    padding: 5px 11px;
+    font-size: 13px;
+    color: var(--text-muted);
+    background: transparent;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+  }
+  .example:hover { color: var(--text); border-color: var(--line-strong); }
+
+  /* ---------- tabs ---------- */
+
+  .tabs {
+    display: flex; gap: 2px;
+    margin-bottom: 20px;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .tab {
+    padding: 9px 14px;
+    font: inherit;
+    font-size: 14px;
+    color: var(--text-muted);
+    background: transparent;
+    border: 0;
+    border-bottom: 2px solid transparent;
+    border-radius: 0;
+    margin-bottom: -1px;
+  }
+  .tab:hover { color: var(--text); }
+  .tab[aria-selected="true"] {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+    font-weight: 500;
+  }
+  .tab .count { font-weight: 400; color: var(--text-faint); }
+
+  /* ---------- grid toolbar ---------- */
+
+  .gridbar { display: flex; gap: 10px; align-items: center; margin-bottom: 14px; }
+
+  .gridbar input[type=text] {
+    flex: 1;
+    padding: 9px 13px;
+    font-size: 14px;
+  }
+
+  .ghost {
+    padding: 9px 14px;
+    font-size: 14px;
+    color: var(--text);
+    background: var(--surface);
+    border: 1px solid var(--line-strong);
+    white-space: nowrap;
+  }
+  .ghost:hover { background: var(--bg); }
+
+  /* ---------- editable grid ---------- */
+
+  /* A spreadsheet scrolls sideways; it does not crush 20 columns into one
+     screen width. One line per cell keeps rows uniform and scannable - the
+     full value is visible the moment the cell is opened for editing. */
+  .grid { table-layout: fixed; min-width: 3600px; }
+
+  .grid th, .grid td {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 0;      /* lets the fixed layout honour the col widths */
+  }
+
+  .grid td { cursor: text; height: 40px; padding: 0 12px; }
+  .grid thead th { padding: 9px 12px; }
+  .grid td:hover { box-shadow: inset 0 0 0 1px var(--line-strong); }
+  .grid td:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+  .grid th.sortable { cursor: pointer; user-select: none; }
+  .grid th.sortable:hover { color: var(--text); }
+  .grid th .arrow { margin-left: 4px; color: var(--accent); }
+
+  .cellinput {
+    width: 100%;
+    padding: 2px 4px;
+    margin: -3px -5px;
+    font: inherit;
+    color: var(--text);
+    background: var(--surface);
+    border: 1px solid var(--accent);
+    border-radius: 5px;
+  }
+  .cellinput:focus { outline: none; box-shadow: 0 0 0 3px var(--accent-soft); }
+
+  .grid col.g-wide   { width: 230px; }
+  .grid col.g-med    { width: 150px; }
+  .grid col.g-narrow { width: 110px; }
+  .grid col.g-del    { width: 76px; }
+
+  .grid td.check { text-align: center; cursor: default; }
+  .grid td.check:hover { box-shadow: none; }
+  .grid td.check input {
+    width: 16px; height: 16px;
+    accent-color: var(--accent);
+    cursor: pointer;
+  }
+
+  select.cellinput { padding: 3px 4px; }
+
+  .grid .rowdel { width: 44px; text-align: center; cursor: default; padding: 0; }
+  .grid .rowdel:hover { box-shadow: none; }
+
+  /* ---------- status ---------- */
+
+  #status { margin-bottom: 20px; font-size: 14px; min-height: 22px; }
+  #status:empty { display: none; }
+
+  .working { color: var(--text-muted); display: flex; align-items: center; gap: 9px; }
+
+  .spinner {
+    width: 13px; height: 13px;
+    border: 2px solid var(--line-strong);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin .7s linear infinite;
+    flex: none;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .error {
+    padding: 12px 14px;
+    color: var(--danger-fg);
+    background: var(--danger-bg);
+    border: 1px solid var(--danger-line);
+    border-radius: var(--radius);
+    white-space: pre-wrap;
+  }
+
+  .summary { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+
+  .notice {
+    margin-top: 10px;
+    padding: 10px 13px;
+    font-size: 13.5px;
+    color: var(--review-fg);
+    background: var(--review-bg);
+    border: 1px solid var(--review-line);
+    border-radius: var(--radius);
+  }
+
+  .count { font-weight: 600; }
+
+  /* ---------- badges ---------- */
+
+  .badge {
+    display: inline-block;
+    padding: 2px 9px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+    border: 1px solid;
+    border-radius: 5px;
+    white-space: nowrap;
+  }
+  .badge.new      { color: var(--new-fg);      background: var(--new-bg);      border-color: var(--new-line); }
+  .badge.existing { color: var(--existing-fg); background: var(--existing-bg); border-color: var(--existing-line); }
+  .badge.updated  { color: var(--updated-fg);  background: var(--updated-bg);  border-color: var(--updated-line); }
+  .badge.review   { color: var(--review-fg);   background: var(--review-bg);   border-color: var(--review-line); }
+
+  /* ---------- table ---------- */
+
+  .table-wrap {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    overflow: auto;
+    max-height: 62vh;
+  }
+
+  /* Fixed layout: Google's formatted addresses are long enough to starve every
+     other column, which pushed the Status badge off the right edge entirely. */
+  table { width: 100%; border-collapse: collapse; font-size: 14px; table-layout: fixed; }
+  col.c-name   { width: 21%; }
+  col.c-doctor { width: 13%; }
+  col.c-rating { width: 10%; }
+  col.c-phone  { width: 13%; }
+  col.c-site   { width: 15%; }
+  col.c-addr   { width: 19%; }
+  col.c-status { width: 9%; }
+
+  th.sortable { cursor: pointer; user-select: none; }
+  th.sortable:hover { color: var(--text); }
+  th .arrow { margin-left: 4px; color: var(--accent); }
+
+  thead th {
+    position: sticky; top: 0; z-index: 1;
+    padding: 11px 16px;
+    text-align: left;
+    font-size: 11.5px;
+    font-weight: 600;
+    letter-spacing: .05em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    background: var(--surface);
+    border-bottom: 1px solid var(--line);
+    white-space: nowrap;
+  }
+
+  tbody td {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--line);
+    vertical-align: top;
+  }
+
+  tbody tr:last-child td { border-bottom: 0; }
+  tbody tr:hover td { background: var(--bg); }
+
+  tbody tr {
+    animation: rise .34s cubic-bezier(.16,1,.3,1) backwards;
+  }
+  @keyframes rise {
+    from { opacity: 0; transform: translateY(5px); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    tbody tr { animation: none; }
+    .spinner { animation-duration: 2s; }
+  }
+
+  .name { font-weight: 500; }
+  .addr { color: var(--text-muted); }
+
+  /* Two lines, then ellipsis. The full address stays in the title attribute and
+     in the workbook - this only bounds row height so results stay scannable. */
+  a.clamp { display: -webkit-box; }
+
+  .clamp {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  td .cell { overflow-wrap: anywhere; }
+  .nowrap { white-space: nowrap; }
+  .muted { color: var(--text-faint); }
+
+  a { color: var(--accent); text-decoration-color: color-mix(in srgb, var(--accent) 35%, transparent); }
+  a:hover { text-decoration-color: currentColor; }
+
+  /* ---------- empty ---------- */
+
+  .empty {
+    padding: 64px 24px;
+    text-align: center;
+    color: var(--text-muted);
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+  }
+  .empty p { margin: 0; }
+  .empty p + p { margin-top: 8px; font-size: 13.5px; color: var(--text-faint); }
+
+  /* ---------- action bar ---------- */
+
+  .actionbar {
+    position: fixed;
+    left: 0; right: 0; bottom: 0;
+    display: flex; align-items: center; gap: 16px;
+    padding: 14px 28px;
+    background: var(--surface);
+    border-top: 1px solid var(--line);
+    box-shadow: var(--shadow);
+  }
+  .actionbar[hidden] { display: none; }
+  .actionbar .inner {
+    display: flex; align-items: center; gap: 16px;
+    width: 100%; max-width: 1240px; margin: 0 auto;
+  }
+  .actionbar .note { color: var(--text-muted); font-size: 13.5px; margin-right: auto; }
+
+  .actionbar .primary { display: inline-flex; align-items: center; gap: 8px; padding: 11px 18px; }
+  .actionbar svg { width: 16px; height: 16px; }
+
+  @media (max-width: 720px) {
+    form { flex-direction: column; }
+    .addr { max-width: none; }
+    .actionbar { padding: 12px 16px; }
+    .actionbar .inner { flex-wrap: wrap; gap: 10px; }
+  }
+</style>
+</head>
+<body>
+<div class="layout">
+
+  <aside class="sidebar">
+    <div class="sidebar-head">
+      <h2>Workbooks</h2>
+      <button class="iconbtn" id="newbook" type="button" title="New workbook" aria-label="New workbook">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-8"></path>
+          <path d="M18 2v6M15 5h6"></path>
+        </svg>
+      </button>
+      <button class="iconbtn" id="newfolder" type="button" title="New folder" aria-label="New folder">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"></path>
+          <path d="M12 11v5M9.5 13.5h5"></path>
+        </svg>
+      </button>
+    </div>
+    <div class="tree" id="tree"></div>
+  </aside>
+
+<div class="shell">
+
+  <header>
+    <h1>Business Research Agent</h1>
+    <p class="subtitle">Search, review, then append to your master workbook.</p>
+  </header>
+
+  <form id="form">
+    <div class="field">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="11" cy="11" r="7"></circle><path d="M20 20l-3.5-3.5"></path>
+      </svg>
+      <input id="input" type="text" autocomplete="off" autofocus
+             placeholder="Find dental clinics in Chromepet"
+             aria-label="Research command">
+    </div>
+    <button class="primary" id="run" type="submit">Run</button>
+  </form>
+
+  <div class="examples">
+    <button class="example" type="button">Find dental clinics in Chromepet</button>
+    <button class="example" type="button">Find 50 dental clinics in Chennai</button>
+    <button class="example" type="button">Find clinics within 3 km of Tambaram</button>
+    <button class="example" type="button">Show clinics without websites</button>
+    <button class="example" type="button">Remove duplicates</button>
+  </div>
+
+  <div class="tabs" role="tablist">
+    <button class="tab" id="tab-results" type="button" role="tab"
+            aria-selected="true" aria-controls="results">Results</button>
+    <button class="tab" id="tab-workbook" type="button" role="tab"
+            aria-selected="false" aria-controls="results">Workbook</button>
+  </div>
+
+  <div id="status" role="status" aria-live="polite"></div>
+
+  <div id="results">
+    <div class="empty">
+      <p>No results yet.</p>
+      <p>Run a command above. Nothing is written to your workbook until you save.</p>
+    </div>
+  </div>
+
+</div>
+</div>
+
+<div class="actionbar" id="actionbar" hidden>
+  <div class="inner">
+    <span class="note" id="savenote"></span>
+    <button class="primary" id="save" type="button">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z"></path>
+        <path d="M17 21v-8H7v8M7 3v5h8"></path>
+      </svg>
+      <span id="savelabel">Add to Excel</span>
+    </button>
+  </div>
+</div>
+
+<script>
+'use strict';
+
+const $ = (id) => document.getElementById(id);
+const DEFAULT_WORKBOOK = 'businesses.xlsx';
+let selected = DEFAULT_WORKBOOK;
+const form = $('form'), input = $('input'), run = $('run');
+const statusEl = $('status'), results = $('results');
+const actionbar = $('actionbar'), saveBtn = $('save'), saveNote = $('savenote');
+const treeEl = $('tree');
+let _buffer = [];
+
+const DASH = '—';
+const NUMERIC_FIELDS = new Set(['rating', 'review_count', 'latitude', 'longitude']);
+
+/**
+ * Sort rows by `field`. dir 1 ascending, -1 descending.
+ * Missing values always sort last, whichever direction — absent data is not a
+ * low score, and burying it keeps the useful rows at the top.
+ */
+function sortRows(rows, field, dir) {
+  if (!field) return rows;
+  const numeric = NUMERIC_FIELDS.has(field);
+  return rows.slice().sort((a, b) => {
+    const av = a[field], bv = b[field];
+    const aEmpty = av === null || av === undefined || av === '';
+    const bEmpty = bv === null || bv === undefined || bv === '';
+    if (aEmpty && bEmpty) return 0;
+    if (aEmpty) return 1;
+    if (bEmpty) return -1;
+
+    let cmp;
+    if (numeric) {
+      cmp = Number(av) - Number(bv);
+      // Rating ties break on review count: 4.9 from 568 beats 5.0 from 40.
+      if (cmp === 0 && field === 'rating') {
+        cmp = Number(a.review_count || 0) - Number(b.review_count || 0);
+      }
+    } else {
+      cmp = String(av).toLowerCase().localeCompare(String(bv).toLowerCase());
+    }
+    return cmp * dir;
+  });
+}
+
+function ratingCell(b) {
+  if (b.rating === null || b.rating === undefined) {
+    return `<span class="muted">${DASH}</span>`;
+  }
+  const count = b.review_count
+    ? ` <span class="muted">(${esc(b.review_count)})</span>` : '';
+  return `<strong>${esc(b.rating)}</strong>${count}`;
+}
+const TAGS = ['new', 'updated', 'existing', 'review'];
+
+/** Escape before any interpolation: business names come from third-party data. */
+const esc = (v) => String(v).replace(/[&<>"']/g, (c) => (
+  { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+));
+
+/** Never render null/undefined/empty as text the operator has to interpret. */
+const cell = (v) => (v === null || v === undefined || v === '')
+  ? `<span class="muted">${DASH}</span>`
+  : esc(v);
+
+/** Google returns "…, Chennai, Tamil Nadu 600024, India". The country and state
+ *  are the same on every row and only cost vertical space; both stay in full in
+ *  the workbook and in the cell's title attribute. */
+function shortAddress(b) {
+  const raw = b.address || b.area;
+  if (!raw) return null;
+  const parts = raw.split(',').map((s) => s.trim()).filter(Boolean);
+  const trimmed = parts.filter((p) => !/^india$/i.test(p));
+  return (trimmed.length > 2 ? trimmed : parts).join(', ');
+}
+
+function link(url, label) {
+  if (!url) return `<span class="muted">${DASH}</span>`;
+  const href = /^https?:\/\//i.test(url) ? url : 'https://' + url;
+  // Display drops the scheme, www, and any query string. A tracking URL's
+  // utm_* tail is never useful to read and wrapped one row to eight lines.
+  const text = label || href
+    .replace(/^https?:\/\//i, '')
+    .replace(/^www\./i, '')
+    .split(/[?#]/)[0]
+    .replace(/\/$/, '');
+  return `<a href="${esc(href)}" target="_blank" rel="noopener noreferrer"
+    title="${esc(href)}" class="clamp">${esc(text)}</a>`;
+}
+
+function setBusy(busy, message) {
+  run.disabled = busy;
+  // While busy, always disabled. Otherwise defer to whatever setSaveState decided.
+  saveBtn.disabled = busy || saveBtn.dataset.empty === '1';
+  if (busy) {
+    statusEl.innerHTML =
+      `<span class="working"><span class="spinner"></span>${esc(message)}</span>`;
+  }
+}
+
+function showError(message) {
+  // Verbatim: the API's messages name the problem and the fix (e.g. a missing
+  // GEMINI_API_KEY). Replacing them with a generic string strands the user.
+  statusEl.innerHTML = `<div class="error">${esc(message)}</div>`;
+}
+
+async function call(path, body, method = 'POST') {
+  const res = await fetch(path, {
+    method,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body || {}),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(data.detail || `${res.status} ${res.statusText}`);
+  }
+  return data;
+}
+
+function summaryLine(count, summary) {
+  const parts = [`<span class="count">${count}</span> found`];
+  for (const tag of TAGS) {
+    if (summary && summary[tag]) {
+      parts.push(`<span class="badge ${tag}">${tag}</span> ${summary[tag]}`);
+    }
+  }
+  return `<div class="summary">${parts.join('<span class="muted">·</span> ')}</div>`;
+}
+
+function noticeLine(notice) {
+  return notice ? `<div class="notice">${esc(notice)}</div>` : '';
+}
+
+function renderTable(rows, opts) {
+  if (!rows.length) {
+    results.innerHTML =
+      `<div class="empty"><p>${esc(opts.emptyText)}</p></div>`;
+    return;
+  }
+  const showTag = opts.showTag !== false;
+  rows = sortRows(rows, resultSort.field, resultSort.dir);
+
+  const spec = [
+    ['name', 'Business', 'business_name'], ['doctor', 'Doctor', 'doctor_name'],
+    ['rating', 'Rating', 'rating'], ['phone', 'Phone', 'phone'],
+    ['site', 'Website', 'website'], ['addr', 'Address', 'address'],
+  ].concat(showTag ? [['status', 'Status', 'tag']] : []);
+
+  const cols = spec.map(([c]) => `<col class="c-${c}">`).join('');
+  const head = spec.map(([, label, field]) => {
+    const arrow = resultSort.field === field
+      ? (resultSort.dir === 1 ? '↑' : '↓') : '';
+    return `<th scope="col" class="sortable" data-rsort="${field}">${label}` +
+      (arrow ? `<span class="arrow">${arrow}</span>` : '') + `</th>`;
+  }).join('');
+
+  const body = rows.map((b, i) => `
+    <tr style="animation-delay:${Math.min(i, 12) * 18}ms">
+      <td class="name"><span class="cell">${cell(b.business_name)}</span>${
+        b.google_maps_url
+          ? ` <a href="${esc(b.google_maps_url)}" target="_blank" rel="noopener noreferrer"
+                 title="Open in Google Maps">map</a>`
+          : ''
+      }</td>
+      <td><span class="cell">${cell(b.doctor_name)}</span></td>
+      <td class="nowrap">${ratingCell(b)}</td>
+      <td class="nowrap">${cell(b.phone)}</td>
+      <td><span class="cell">${link(b.website)}</span></td>
+      <td class="addr"><div class="clamp cell" title="${esc(b.address || b.area || '')}">${
+        cell(shortAddress(b))
+      }</div></td>
+      ${showTag ? `<td><span class="badge ${esc(b.tag)}">${esc(b.tag)}</span></td>` : ''}
+    </tr>`).join('');
+
+  results.innerHTML =
+    `<div class="table-wrap"><table><colgroup>${cols}</colgroup>` +
+    `<thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+}
+
+function setSaveState(rows) {
+  const saveable = rows.filter((b) => b.tag === 'new' || b.tag === 'updated' || b.tag === 'review');
+  if (!rows.length) {
+    actionbar.hidden = true;
+    return;
+  }
+  actionbar.hidden = false;
+  saveBtn.disabled = saveable.length === 0;
+  saveBtn.dataset.empty = saveable.length === 0 ? '1' : '0';
+  saveNote.textContent = saveable.length
+    ? `${saveable.length} of ${rows.length} will be written to ${selected}`
+    : `Every result is already in ${selected}. Nothing to save.`;
+}
+
+function handleResponse(data) {
+  if (data.action === 'search') {
+    statusEl.innerHTML = summaryLine(data.count, data.summary) + noticeLine(data.notice);
+    _buffer = data.businesses;
+    renderTable(data.businesses, {
+      emptyText: 'No businesses matched. Try a broader area, or switch to the Google Places provider.',
+    });
+    setSaveState(data.businesses);
+    return;
+  }
+
+  if (data.action === 'filter') {
+    statusEl.innerHTML =
+      `<div class="summary"><span class="count">${data.count}</span> stored ${esc(String(data.filter).replace(/_/g, ' '))}</div>`;
+    renderTable(data.businesses, { showTag: false, emptyText: 'Nothing stored matches that filter.' });
+    actionbar.hidden = true;
+    return;
+  }
+
+  if (data.action === 'deduplicate') {
+    statusEl.innerHTML = `<div class="summary">Removed <span class="count">${data.removed}</span> duplicate ${data.removed === 1 ? 'record' : 'records'}.</div>`;
+    return;
+  }
+
+  if (data.action === 'store') {
+    reportSave(data);
+    return;
+  }
+
+  if (data.action === 'export') {
+    statusEl.innerHTML = `<div class="summary">Exported <span class="count">${data.written}</span> records to ${esc(data.path)}</div>`;
+    return;
+  }
+
+  statusEl.innerHTML = `<div class="summary">${esc(JSON.stringify(data))}</div>`;
+}
+
+function reportSave(counts) {
+  _buffer = [];
+  const written = (counts.new || 0) + (counts.updated || 0) + (counts.review || 0);
+  const parts = [];
+  for (const tag of TAGS) {
+    if (counts[tag]) parts.push(`<span class="badge ${tag}">${tag}</span> ${counts[tag]}`);
+  }
+  statusEl.innerHTML =
+    `<div class="summary">Saved <span class="count">${written}</span> to the workbook${
+      parts.length ? '<span class="muted">·</span>' + parts.join('<span class="muted">·</span>') : ''
+    }</div>`;
+  actionbar.hidden = true;
+  results.innerHTML =
+    `<div class="empty"><p>Saved.</p><p>Run another command to keep building the list.</p></div>`;
+}
+
+form.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const text = input.value.trim();
+  if (!text) return;
+  setBusy(true, 'Searching, then reading business websites…');
+  try {
+    handleResponse(await call('/command', { command: text, workbook: selected }));
+  } catch (err) {
+    showError(err.message);
+    actionbar.hidden = true;
+  } finally {
+    setBusy(false);
+  }
+});
+
+saveBtn.addEventListener('click', async () => {
+  setBusy(true, 'Writing to the workbook…');
+  try {
+    reportSave(await call('/businesses/save', { workbook: selected }));
+  } catch (err) {
+    showError(err.message);
+  } finally {
+    setBusy(false);
+  }
+});
+
+/* ---------- workbook grid ---------- */
+
+const GRID_FIELDS = [
+  ['business_name', 'Business', 'wide'], ['doctor_name', 'Doctor', 'med'],
+  ['phone', 'Phone', 'med'], ['alternate_phone', 'Alt Phone', 'med'],
+  ['email', 'Email', 'med'], ['website', 'Website', 'wide'],
+  ['address', 'Address', 'wide'], ['area', 'Area', 'med'],
+  ['city', 'City', 'narrow'], ['postal_code', 'Postcode', 'narrow'],
+  ['category', 'Category', 'narrow'], ['rating', 'Rating', 'narrow'],
+  ['review_count', 'Reviews', 'narrow'], ['business_status', 'Status (Google)', 'med'],
+  ['status', 'Status', 'narrow'],
+  ['notes', 'Notes', 'wide'],
+  ['short_info', 'Short Info', 'wide'], ['short_info_source', 'Info Source', 'narrow'],
+  ['call_status', 'Call Status', 'med'], ['will_speak_further', 'Will Speak', 'narrow'],
+  ['meeting_date', 'Meeting', 'narrow'], ['meeting_place', 'Meeting Place', 'med'],
+  ['follow_up', 'Follow Up', 'narrow'], ['follow_up_date', 'Follow Up On', 'narrow'],
+  ['source', 'Source', 'narrow'],
+  ['source_id', 'Source ID', 'med'], ['latitude', 'Lat', 'narrow'],
+  ['longitude', 'Lon', 'narrow'], ['date_found', 'Found', 'narrow'],
+  ['last_updated', 'Updated', 'narrow'], ['id', 'ID', 'med'],
+];
+
+const CALL_STATUSES = ['Not called', 'Picked up', 'No answer', 'Wrong number'];
+const INTEREST_VALUES = ['Yes', 'No'];
+
+// Constrained fields get constrained editors. A free-text cell would let
+// "picked up", "Picked Up" and "pickedup" coexist, none of which group together.
+// The server validates the same sets, since the API is reachable without this UI.
+const EDITORS = {
+  call_status: { type: 'select', options: CALL_STATUSES },
+  will_speak_further: { type: 'select', options: INTEREST_VALUES },
+  meeting_date: { type: 'date' },
+  follow_up_date: { type: 'date' },
+  follow_up: { type: 'checkbox' },
+};
+
+let tab = 'results';
+let workbookRows = [];
+let gridFilter = '';
+let gridSort = { field: null, dir: 1 };
+let resultSort = { field: null, dir: 1 };
+
+function setTab(next) {
+  tab = next;
+  $('tab-results').setAttribute('aria-selected', String(next === 'results'));
+  $('tab-workbook').setAttribute('aria-selected', String(next === 'workbook'));
+  if (next === 'workbook') {
+    openWorkbook();
+  } else {
+    actionbar.hidden = _buffer.length === 0;
+    statusEl.innerHTML = '';
+    if (_buffer.length) {
+      renderTable(_buffer, { emptyText: 'No results.' });
+    } else {
+      results.innerHTML =
+        `<div class="empty"><p>No results yet.</p><p>Run a command above. ` +
+        `Nothing is written to your workbook until you save.</p></div>`;
+    }
+  }
+}
+
+async function openWorkbook() {
+  actionbar.hidden = true;
+  results.innerHTML = `<div class="empty"><p>Loading ${esc(selected)}…</p></div>`;
+  try {
+    const data = await call('/workbooks/open', { workbook: selected });
+    workbookRows = data.businesses;
+    statusEl.innerHTML = data.adopted
+      ? noticeLine(`${data.adopted} row${data.adopted === 1 ? '' : 's'} typed ` +
+          `directly into ${selected} ${data.adopted === 1 ? 'was' : 'were'} imported.`)
+      : '';
+    renderGrid();
+  } catch (err) {
+    showError(err.message);
+    results.innerHTML = '';
+  }
+}
+
+function visibleRows() {
+  const needle = gridFilter.trim().toLowerCase();
+  let rows = workbookRows;
+  if (needle) {
+    rows = rows.filter((r) => GRID_FIELDS.some(([f]) =>
+      String(r[f] ?? '').toLowerCase().includes(needle)));
+  }
+  return sortRows(rows, gridSort.field, gridSort.dir);
+}
+
+function renderGrid() {
+  const rows = visibleRows();
+  const bar = `<div class="gridbar">
+    <input type="text" id="gridfilter" placeholder="Filter ${esc(selected)}"
+      value="${esc(gridFilter)}" aria-label="Filter rows">
+    <button class="ghost" id="addrow" type="button">+ Row</button>
+    <button class="ghost" id="dlrow" type="button">Download</button>
+  </div>`;
+
+  if (!workbookRows.length) {
+    results.innerHTML = bar +
+      `<div class="empty"><p>${esc(selected)} is empty.</p>
+       <p>Run a search and save it here, or add a row by hand.</p></div>`;
+    wireGridBar();
+    return;
+  }
+
+  const cols = GRID_FIELDS.map(([, , w]) => `<col class="g-${w}">`).join('')
+    + '<col class="g-del">';
+
+  const head = GRID_FIELDS.map(([f, label]) => {
+    const arrow = gridSort.field === f ? (gridSort.dir === 1 ? '↑' : '↓') : '';
+    return `<th scope="col" class="sortable" data-sort="${f}">${esc(label)}` +
+      (arrow ? `<span class="arrow">${arrow}</span>` : '') + `</th>`;
+  }).join('') + '<th></th>';
+
+  const body = rows.map((r) => `<tr>` + GRID_FIELDS.map(([f]) => {
+    if (f === 'follow_up') {
+      // One click, no typing - the "status button" for whether to chase this lead.
+      return `<td class="check"><input type="checkbox" data-check="${esc(r.id)}"
+        ${r.follow_up ? 'checked' : ''} aria-label="Follow up"></td>`;
+    }
+    const raw = r[f] === null || r[f] === undefined ? '' : String(r[f]);
+    return `<td tabindex="0" data-id="${esc(r.id)}" data-field="${f}"
+      data-raw="${esc(raw)}" title="${esc(raw)}">${
+        raw ? esc(raw) : `<span class="muted">${DASH}</span>`}</td>`;
+  }).join('') + `<td class="rowdel">
+      <button class="iconbtn" data-sum="${esc(r.id)}"
+        title="Summarise from the website"
+        aria-label="Summarise ${esc(r.business_name || 'this row')}">${ICON.sparkle}</button>
+      <button class="iconbtn danger" data-del="${esc(r.id)}"
+        title="Delete row" aria-label="Delete row">${ICON.trash}</button>
+    </td></tr>`).join('');
+
+  results.innerHTML = bar +
+    `<div class="table-wrap"><table class="grid"><colgroup>${cols}</colgroup>` +
+    `<thead><tr>${head}</tr></thead>` +
+    `<tbody>${body}</tbody></table></div>` +
+    `<p class="tree-empty">${rows.length} of ${workbookRows.length} rows` +
+    (gridFilter ? ' (filtered)' : '') + `. Click any cell to edit.</p>`;
+  wireGridBar();
+}
+
+function wireGridBar() {
+  const filter = $('gridfilter');
+  if (filter) {
+    filter.addEventListener('input', (e) => {
+      gridFilter = e.target.value;
+      const pos = e.target.selectionStart;
+      renderGrid();
+      const again = $('gridfilter');
+      again.focus();
+      again.setSelectionRange(pos, pos);
+    });
+  }
+  const add = $('addrow');
+  if (add) {
+    add.addEventListener('click', () => guard(async () => {
+      const out = await call('/businesses', { workbook: selected });
+      workbookRows.push(out.business);
+      renderGrid();
+    }));
+  }
+  const dl = $('dlrow');
+  if (dl) {
+    dl.addEventListener('click', () => {
+      location.href = '/workbooks/download?path=' + encodeURIComponent(selected);
+    });
+  }
+}
+
+function beginEdit(td) {
+  if (td.querySelector('input, select')) return;
+  const field = td.dataset.field;
+  const original = td.dataset.raw || '';
+  const editor = EDITORS[field] || { type: 'text' };
+
+  if (editor.type === 'select') {
+    const opts = [''].concat(editor.options).map((o) =>
+      `<option value="${esc(o)}"${o === original ? ' selected' : ''}>${
+        o ? esc(o) : DASH}</option>`).join('');
+    td.innerHTML = `<select class="cellinput">${opts}</select>`;
+  } else if (editor.type === 'date') {
+    td.innerHTML = `<input class="cellinput" type="date" value="${esc(original)}">`;
+  } else {
+    td.innerHTML = `<input class="cellinput" value="${esc(original)}">`;
+  }
+
+  const input = td.querySelector('.cellinput');
+  input.focus();
+  if (input.select) input.select();
+  let done = false;
+
+  const commit = async () => {
+    if (done) return;
+    done = true;
+    const value = input.value;
+    if (value === original) return renderGrid();
+    try {
+      const out = await call(`/businesses/${encodeURIComponent(td.dataset.id)}`,
+        { changes: { [field]: value }, workbook: selected }, 'PATCH');
+      const i = workbookRows.findIndex((r) => r.id === td.dataset.id);
+      if (i >= 0) workbookRows[i] = out.business;
+      statusEl.innerHTML = '';
+      renderGrid();
+    } catch (err) {
+      // The server names the problem; the cell reverts to its stored value.
+      showError(err.message);
+      renderGrid();
+    }
+  };
+
+  // A select commits the moment a value is chosen; typing needs Enter or blur.
+  if (editor.type === 'select') input.addEventListener('change', commit);
+  input.addEventListener('blur', commit);
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
+    if (e.key === 'Escape') { e.preventDefault(); done = true; renderGrid(); }
+  });
+}
+
+results.addEventListener('click', (event) => {
+  const rth = event.target.closest('th[data-rsort]');
+  if (rth && tab === 'results') {
+    const f = rth.dataset.rsort;
+    // First click on a numeric column shows the best first; text starts A-Z.
+    const firstDir = NUMERIC_FIELDS.has(f) ? -1 : 1;
+    resultSort = resultSort.field === f
+      ? { field: f, dir: -resultSort.dir }
+      : { field: f, dir: firstDir };
+    renderTable(_buffer, { emptyText: 'No results.' });
+    return;
+  }
+  if (tab !== 'workbook') return;
+  const sum = event.target.closest('[data-sum]');
+  if (sum) {
+    const id = sum.dataset.sum;
+    sum.disabled = true;
+    statusEl.innerHTML =
+      `<span class="working"><span class="spinner"></span>Reading the website…</span>`;
+    guard(async () => {
+      const out = await call(`/businesses/${encodeURIComponent(id)}/summarize`,
+        { workbook: selected });
+      const i = workbookRows.findIndex((r) => r.id === id);
+      if (i >= 0) workbookRows[i] = out.business;
+      // A blank result is a correct outcome, not a failure - say which happened.
+      statusEl.innerHTML = out.summarized ? '' : noticeLine(
+        'The pages did not say enough for a factual summary, so nothing was written.');
+      renderGrid();
+    });
+    return;
+  }
+
+  const del = event.target.closest('[data-del]');
+  if (del) {
+    const row = workbookRows.find((r) => r.id === del.dataset.del);
+    const label = row && row.business_name ? `"${row.business_name}"` : 'this row';
+    if (!confirm(`Delete ${label}? This removes it from ${selected}.`)) return;
+    guard(async () => {
+      await call(`/businesses/${encodeURIComponent(del.dataset.del)}`,
+        { workbook: selected }, 'DELETE');
+      workbookRows = workbookRows.filter((r) => r.id !== del.dataset.del);
+      renderGrid();
+    });
+    return;
+  }
+  const check = event.target.closest('input[data-check]');
+  if (check) {
+    const id = check.dataset.check;
+    const checked = check.checked;
+    guard(async () => {
+      const out = await call(`/businesses/${encodeURIComponent(id)}`,
+        { changes: { follow_up: checked }, workbook: selected }, 'PATCH');
+      const i = workbookRows.findIndex((r) => r.id === id);
+      if (i >= 0) workbookRows[i] = out.business;
+      renderGrid();
+    });
+    return;
+  }
+
+  const th = event.target.closest('th[data-sort]');
+  if (th) {
+    const f = th.dataset.sort;
+    const firstDir = NUMERIC_FIELDS.has(f) ? -1 : 1;
+    gridSort = gridSort.field === f
+      ? { field: f, dir: -gridSort.dir }
+      : { field: f, dir: firstDir };
+    renderGrid();
+    return;
+  }
+  const td = event.target.closest('td[data-field]');
+  if (td) beginEdit(td);
+});
+
+results.addEventListener('keydown', (event) => {
+  if (tab !== 'workbook' || event.key !== 'Enter') return;
+  const td = event.target.closest('td[data-field]');
+  if (td) { event.preventDefault(); beginEdit(td); }
+});
+
+$('tab-results').addEventListener('click', () => setTab('results'));
+$('tab-workbook').addEventListener('click', () => setTab('workbook'));
+
+/* ---------- workbook sidebar ---------- */
+
+const ICON = {
+  folder: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+    stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path
+    d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg>`,
+  book: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+    stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path
+    d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8Z"/><path d="M14 3v5h5"/></svg>`,
+  chev: `<svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+    stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>`,
+  download: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+    stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path
+    d="M12 4v11m0 0 4-4m-4 4-4-4"/><path d="M5 19h14"/></svg>`,
+  rename: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+    stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path
+    d="M4 20h4L19 9a2.1 2.1 0 0 0-3-3L5 17v3Z"/><path d="M14.5 6.5 17.5 9.5"/></svg>`,
+  sparkle: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+    stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path
+    d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3Z"/></svg>`,
+  trash: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+    stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path
+    d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>`,
+};
+
+function actionButtons(path, kind) {
+  const dl = kind === 'workbook'
+    ? `<button class="iconbtn" data-act="download" data-path="${esc(path)}"
+         title="Download" aria-label="Download ${esc(path)}">${ICON.download}</button>`
+    : '';
+  return `<span class="actions">${dl}
+    <button class="iconbtn" data-act="rename" data-path="${esc(path)}" data-kind="${kind}"
+      title="Rename or move" aria-label="Rename ${esc(path)}">${ICON.rename}</button>
+    <button class="iconbtn danger" data-act="delete" data-path="${esc(path)}" data-kind="${kind}"
+      title="Delete" aria-label="Delete ${esc(path)}">${ICON.trash}</button></span>`;
+}
+
+function renderNode(node) {
+  if (node.type === 'folder') {
+    return `<li><details open>
+      <summary><span class="row">
+        <button class="node" type="button">${ICON.chev}${ICON.folder}
+          <span class="label">${esc(node.name)}</span></button>
+        ${actionButtons(node.path, 'folder')}
+      </span></summary>
+      <ul>${(node.children || []).map(renderNode).join('')}</ul>
+    </details></li>`;
+  }
+  const current = node.path === selected;
+  return `<li><span class="row">
+    <button class="node" type="button" data-act="select" data-path="${esc(node.path)}"
+      ${current ? 'aria-current="true"' : ''}>${ICON.book}
+      <span class="label">${esc(node.name)}</span></button>
+    ${actionButtons(node.path, 'workbook')}
+  </span></li>`;
+}
+
+async function loadTree() {
+  const res = await fetch('/workbooks');
+  const root = await res.json();
+  const children = root.children || [];
+  treeEl.innerHTML = children.length
+    ? `<ul>${children.map(renderNode).join('')}</ul>`
+    : `<p class="tree-empty">No workbooks yet. Create one above.</p>`;
+  updateSaveLabel();
+}
+
+function updateSaveLabel() {
+  const label = $('savelabel');
+  if (label) label.textContent = `Add to ${selected.split('/').pop()}`;
+}
+
+async function workbookAction(method, body) {
+  const res = await fetch('/workbooks', {
+    method,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.detail || `${res.status} ${res.statusText}`);
+  return data;
+}
+
+async function guard(fn) {
+  try { await fn(); } catch (err) { showError(err.message); }
+}
+
+treeEl.addEventListener('click', (event) => {
+  const btn = event.target.closest('[data-act]');
+  if (!btn) return;
+  const { act, path, kind } = btn.dataset;
+
+  if (act === 'select') {
+    selected = path;
+    loadTree();
+    if (tab === 'workbook') openWorkbook();
+    return;
+  }
+  if (act === 'download') {
+    location.href = '/workbooks/download?path=' + encodeURIComponent(path);
+    return;
+  }
+  if (act === 'rename') {
+    const dst = prompt(`Rename or move "${path}" to:`, path);
+    if (!dst || dst === path) return;
+    guard(async () => {
+      const out = await workbookAction('PATCH', { src: path, dst });
+      if (selected === path) selected = out.path;
+      await loadTree();
+    });
+    return;
+  }
+  if (act === 'delete') {
+    const message = kind === 'folder'
+      ? `Delete the folder "${path}"? It must be empty.`
+      : `Delete "${path}"?\n\nThe file moves to data/.trash and its rows are removed from the app.`;
+    if (!confirm(message)) return;
+    guard(async () => {
+      await workbookAction('DELETE', { path, kind });
+      if (selected === path) selected = DEFAULT_WORKBOOK;
+      await loadTree();
+    });
+  }
+});
+
+$('newbook').addEventListener('click', () => {
+  const name = prompt('New workbook path, e.g. dental/chennai.xlsx');
+  if (!name) return;
+  const path = name.endsWith('.xlsx') ? name : name + '.xlsx';
+  guard(async () => {
+    await workbookAction('POST', { path, kind: 'workbook' });
+    selected = path;
+    await loadTree();
+  });
+});
+
+$('newfolder').addEventListener('click', () => {
+  const path = prompt('New folder path, e.g. dental');
+  if (!path) return;
+  guard(async () => {
+    await workbookAction('POST', { path, kind: 'folder' });
+    await loadTree();
+  });
+});
+
+loadTree();
+
+for (const chip of document.querySelectorAll('.example')) {
+  chip.addEventListener('click', () => {
+    input.value = chip.textContent.trim();
+    input.focus();
+    form.requestSubmit();
+  });
+}
+</script>
+</body>
+</html>
