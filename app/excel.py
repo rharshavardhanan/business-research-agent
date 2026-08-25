@@ -1,13 +1,14 @@
-"""Renders the SQLite store into `data/businesses.xlsx`.
+"""Renders stored businesses into an .xlsx, in memory.
 
-The workbook is the user's working surface - they sort it, filter it, widen
-columns, and add notes. So this updates in place and never recreates a workbook
-that already exists: regenerating it every run would silently destroy that work.
+Nothing is written to disk. Serverless hosting has no persistent filesystem, so
+the workbook is built fresh on every download rather than kept as a file. The
+consequence, recorded so it is not rediscovered: rows typed directly into a
+downloaded sheet cannot be read back, because there is no stored file to read.
 """
 
-from pathlib import Path
+from io import BytesIO
 
-from openpyxl import Workbook, load_workbook
+from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
@@ -88,71 +89,6 @@ _WIDTHS = {
 _HYPERLINK_COLUMNS = {"Website", "Google Maps URL"}
 
 
-def sync(businesses: list[Business], path: Path | str) -> dict[str, int]:
-    """Write `businesses` into the workbook at `path`, updating rows in place.
-
-    Returns {"written": n, "created": 0|1}.
-    """
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    created = 0
-
-    if path.exists():
-        wb = load_workbook(path)
-        ws = wb[SHEET] if SHEET in wb.sheetnames else wb.create_sheet(SHEET)
-        if ws.max_row < 1 or ws.cell(row=1, column=1).value != COLUMNS[0]:
-            _write_header(ws)
-            _apply_widths(ws)
-    else:
-        wb = Workbook()
-        ws = wb.active
-        ws.title = SHEET
-        _write_header(ws)
-        # Widths are set only at creation. On the update path the user may have
-        # resized columns by hand, and overwriting that is the whole reason this
-        # function updates in place instead of regenerating.
-        _apply_widths(ws)
-        created = 1
-
-    row_for_id = {
-        ws.cell(row=r, column=1).value: r
-        for r in range(2, ws.max_row + 1)
-        if ws.cell(row=r, column=1).value
-    }
-
-    for business in businesses:
-        row = row_for_id.get(business.id)
-        if row is None:
-            row = ws.max_row + 1
-            if business.id:
-                row_for_id[business.id] = row
-        _write_row(ws, row, business)
-
-    _prune(ws, row_for_id, {b.id for b in businesses if b.id})
-
-    ws.freeze_panes = "A2"
-    ws.auto_filter.ref = ws.dimensions
-    wb.save(path)
-    return {"written": len(businesses), "created": created}
-
-
-def _prune(ws: Worksheet, row_for_id: dict, live_ids: set) -> None:
-    """Delete rows this app wrote that the store no longer has.
-
-    Without this, `Remove duplicates` drops rows from the database and leaves
-    them visible in the sheet forever.
-
-    Only rows carrying an ID we wrote are eligible. A row the user typed by hand
-    has an empty ID column and is never touched - they edit this file, and
-    deleting their work would be far worse than showing a stale row.
-    """
-    stale = sorted(
-        (row for wid, row in row_for_id.items() if wid not in live_ids),
-        reverse=True,  # bottom-up, so earlier deletions do not shift later rows
-    )
-    for row in stale:
-        ws.delete_rows(row)
-
 
 def _write_header(ws: Worksheet) -> None:
     for col, header in enumerate(COLUMNS, start=1):
@@ -189,79 +125,20 @@ def _write_row(ws: Worksheet, row: int, business: Business) -> None:
             cell.alignment = Alignment(wrap_text=True, vertical="top")
 
 
-def read_rows(path: Path | str) -> list[dict]:
-    """Parse a workbook back into field dicts keyed by Business field name.
+def build(businesses: list[Business]) -> bytes:
+    """Render a workbook in memory and return its bytes."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = SHEET
+    _write_header(ws)
+    _apply_widths(ws)
 
-    Used to find rows the user typed straight into Excel: those have an empty
-    ID cell, because only this app writes IDs. Blank cells become None, and a
-    row with no business name is skipped as spreadsheet noise.
-    """
-    path = Path(path)
-    if not path.exists():
-        return []
-    wb = load_workbook(path)
-    if SHEET not in wb.sheetnames:
-        return []
-    ws = wb[SHEET]
+    for row, business in enumerate(businesses, start=2):
+        _write_row(ws, row, business)
 
-    header = [c.value for c in ws[1]]
-    index = {name: i for i, name in enumerate(header) if name in COLUMNS}
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
 
-    out: list[dict] = []
-    for row in ws.iter_rows(min_row=2, values_only=True):
-        record: dict = {}
-        for heading, field in _LAYOUT:
-            i = index.get(heading)
-            value = row[i] if i is not None and i < len(row) else None
-            if isinstance(value, str):
-                value = value.strip() or None
-            record[field] = value
-        if not record.get("business_name"):
-            continue
-        # Reverse what _write_row rendered: "field: url" lines and "Yes"/blank.
-        record["sources"] = _parse_sources(record.get("sources"))
-        record["follow_up"] = str(record.get("follow_up") or "").strip().lower() in (
-            "yes", "true", "1"
-        )
-        out.append(record)
-    return out
-
-
-def _parse_sources(raw) -> dict[str, str]:
-    """Reverse of the "field: url" rendering in _write_row."""
-    if not raw or not isinstance(raw, str):
-        return {}
-    parsed: dict[str, str] = {}
-    for line in raw.splitlines():
-        field, _, url = line.partition(":")
-        if field.strip() and url.strip():
-            parsed[field.strip()] = url.strip()
-    return parsed
-
-
-def delete_orphan_rows(path: Path | str) -> int:
-    """Remove data rows with an empty ID cell. Returns how many were removed.
-
-    Called after adoption: the hand-typed row has become an app-managed record
-    with an ID, so leaving the original in place would make the next open adopt
-    it all over again.
-    """
-    path = Path(path)
-    if not path.exists():
-        return 0
-    wb = load_workbook(path)
-    if SHEET not in wb.sheetnames:
-        return 0
-    ws = wb[SHEET]
-
-    stale = [
-        r
-        for r in range(2, ws.max_row + 1)
-        if not ws.cell(row=r, column=1).value
-        and ws.cell(row=r, column=COLUMNS.index("Business Name") + 1).value
-    ]
-    for r in sorted(stale, reverse=True):
-        ws.delete_rows(r)
-    if stale:
-        wb.save(path)
-    return len(stale)
+    buffer = BytesIO()
+    wb.save(buffer)
+    return buffer.getvalue()

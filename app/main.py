@@ -15,12 +15,17 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+import asyncio
+
+import httpx
+
 from app import excel
 from app import workbooks as wb
+from app.enrichment import PER_BUSINESS_BUDGET, USER_AGENT, enrich
 from app.providers import PLACES_MAX_RESULTS
 from app.models import Business, Command
 from app.enrichment import fetch_page_text
@@ -42,10 +47,9 @@ logging.basicConfig(
 )
 log = logging.getLogger("app")
 
-# Owned by app.workbooks so there is exactly one definition. A second copy here
-# drifted the moment tests pointed DATA_DIR elsewhere: main wrote to the temp
-# directory while workbooks resolved paths against the original one.
-DATA_DIR = wb.DATA_DIR
+DATABASE_URL = os.environ.get("DATABASE_URL") or os.environ.get(
+    "DATABASE_URL_TEST", "postgresql://postgres:test@localhost:55432/bra"
+)
 
 app = FastAPI(title="Business Research Agent")
 
@@ -89,14 +93,14 @@ async def require_password(request: Request, call_next):
         headers={"WWW-Authenticate": 'Basic realm="Business Research Agent"'},
     )
 
-_store = Store(DATA_DIR / "leads.db")
-# Single-user local tool: one buffer, no session keying. Cleared on restart.
-_buffer: list[TaggedBusiness] = []
+_store = Store(DATABASE_URL)
+_store.init_schema()
 
 
 class CommandRequest(BaseModel):
     command: str
     workbook: str = DEFAULT_WORKBOOK
+    businesses: list[dict] = []
 
 
 class SearchRequest(BaseModel):
@@ -109,6 +113,14 @@ class SearchRequest(BaseModel):
 
 class SaveRequest(BaseModel):
     workbook: str = DEFAULT_WORKBOOK
+    # The browser holds the result set. Serverless has no shared process memory,
+    # so consecutive requests land on different instances and a server-side
+    # buffer would simply be gone by the time Save is pressed.
+    businesses: list[dict] = []
+
+
+class EnrichRequest(BaseModel):
+    business: dict
 
 
 class EditRequest(BaseModel):
@@ -148,7 +160,6 @@ async def _run_search(
     radius_km: int | None = None,
     workbook: str = DEFAULT_WORKBOOK,
 ) -> dict:
-    global _buffer
     command = Command(
         action="search",
         business_type=business_type,
@@ -157,7 +168,7 @@ async def _run_search(
         radius_km=radius_km,
     )
     try:
-        _buffer = await research(command, _store, workbook)
+        results = await research(command, _store, workbook)
     except RuntimeError as exc:
         # Provider misconfiguration or an unreachable upstream. The message is
         # written to be actionable, so pass it through rather than masking it.
@@ -165,11 +176,11 @@ async def _run_search(
 
     return {
         "action": "search",
-        "count": len(_buffer),
-        "summary": _counts(_buffer),
-        "notice": _shortfall_notice(len(_buffer), quantity),
+        "count": len(results),
+        "summary": _counts(results),
+        "notice": _shortfall_notice(len(results), quantity),
         "workbook": workbook,
-        "businesses": _serialize(_buffer),
+        "businesses": _serialize(results),
     }
 
 
@@ -193,20 +204,17 @@ def _shortfall_notice(found: int, requested: int | None) -> str | None:
     )
 
 
-def _save_buffer(workbook: str = DEFAULT_WORKBOOK) -> dict[str, int]:
-    global _buffer
-    if not _buffer:
-        return {"new": 0, "updated": 0, "existing": 0, "review": 0}
-
-    target = wb.resolve_path(workbook, require_xlsx=True)
-    tagged = _store.upsert_many([t.business for t in _buffer], workbook)
-    excel.sync(_store.all(workbook), target)
-    _buffer = []
-
+def _save(workbook: str, rows: list[dict]) -> dict[str, int]:
+    """Persist rows the client sends back. Nothing is held between requests."""
     counts = {"new": 0, "updated": 0, "existing": 0, "review": 0}
+    if not rows:
+        return counts
+
+    incoming = [Business(**{k: v for k, v in r.items() if k != "tag"}) for r in rows]
+    tagged = _store.upsert_many(incoming, workbook)
     for _, tag in tagged:
         counts[tag] = counts.get(tag, 0) + 1
-    log.info("saved: %s", counts)
+    log.info("saved to %s: %s", workbook, counts)
     return counts
 
 
@@ -250,12 +258,10 @@ async def command_endpoint(body: CommandRequest) -> dict:
         )
 
     if command.action == "store":
-        return {"action": "store", **_save_buffer(body.workbook)}
+        return {"action": "store", **_save(body.workbook, body.businesses)}
 
     if command.action == "deduplicate":
-        removed = _store.dedupe_existing(body.workbook)
-        excel.sync(_store.all(body.workbook), wb.resolve_path(body.workbook, require_xlsx=True))
-        return {"action": "deduplicate", "removed": removed}
+        return {"action": "deduplicate", "removed": _store.dedupe_existing(body.workbook)}
 
     if command.action == "filter":
         if not command.filter_kind:
@@ -269,9 +275,9 @@ async def command_endpoint(body: CommandRequest) -> dict:
         }
 
     if command.action == "export":
-        target = wb.resolve_path(body.workbook, require_xlsx=True)
-        result = excel.sync(_store.all(body.workbook), target)
-        return {"action": "export", "path": body.workbook, **result}
+        # Nothing to write: the workbook is generated at download time.
+        rows = _store.all(body.workbook)
+        return {"action": "export", "path": body.workbook, "written": len(rows)}
 
     raise HTTPException(
         400,
@@ -290,7 +296,7 @@ async def search_endpoint(body: SearchRequest) -> dict:
 @app.post("/businesses/save")
 def save_endpoint(body: SaveRequest) -> dict[str, int]:
     try:
-        return _save_buffer(body.workbook)
+        return _save(wb.validate(body.workbook, require_xlsx=True), body.businesses)
     except wb.InvalidPath as exc:
         raise HTTPException(400, str(exc)) from exc
 
@@ -298,7 +304,6 @@ def save_endpoint(body: SaveRequest) -> dict[str, int]:
 @app.post("/businesses/deduplicate")
 def deduplicate_endpoint(body: SaveRequest) -> dict:
     removed = _store.dedupe_existing(body.workbook)
-    excel.sync(_store.all(body.workbook), wb.resolve_path(body.workbook, require_xlsx=True))
     return {"removed": removed, "remaining": len(_store.all(body.workbook))}
 
 
@@ -314,20 +319,10 @@ def list_endpoint(filter: str | None = None, workbook: str | None = None) -> dic
 # --- workbook editor -------------------------------------------------------
 
 
-def _resync(workbook: str) -> None:
-    """Re-render the sheet from the store after any mutation.
-
-    The store is the source of truth; skipping this leaves the .xlsx silently
-    lagging until the next save.
-    """
-    excel.sync(_store.all(workbook), wb.resolve_path(workbook, require_xlsx=True))
-
-
 @app.post("/businesses")
 def add_row(body: RowRequest) -> dict:
     try:
         row = _store.create_blank(body.workbook)
-        _resync(body.workbook)
     except wb.InvalidPath as exc:
         raise HTTPException(400, str(exc)) from exc
     return {"business": row.model_dump()}
@@ -337,7 +332,6 @@ def add_row(body: RowRequest) -> dict:
 def edit_row(row_id: str, body: EditRequest) -> dict:
     try:
         row = _store.update_fields(row_id, body.changes)
-        _resync(body.workbook)
     except (DuplicateId, InvalidField, wb.InvalidPath) as exc:
         raise HTTPException(400, str(exc)) from exc
     return {"business": row.model_dump()}
@@ -345,13 +339,32 @@ def edit_row(row_id: str, body: EditRequest) -> dict:
 
 @app.delete("/businesses/{row_id}")
 def remove_row(row_id: str, body: RowRequest) -> dict:
-    removed = _store.delete_row(row_id)
-    if removed:
-        try:
-            _resync(body.workbook)
-        except wb.InvalidPath as exc:
-            raise HTTPException(400, str(exc)) from exc
-    return {"deleted": removed}
+    return {"deleted": _store.delete_row(row_id)}
+
+
+@app.post("/enrich")
+async def enrich_one(body: EnrichRequest) -> dict:
+    """Enrich a single business from its website.
+
+    One business per request, so every call is short enough for a serverless
+    function timeout and a slow site delays one row instead of the whole search.
+    """
+    business = Business(**{k: v for k, v in body.business.items() if k != "tag"})
+    if not business.website:
+        return {"business": business.model_dump(), "enriched": False}
+
+    try:
+        async with httpx.AsyncClient(headers={"User-Agent": USER_AGENT}) as http:
+            enriched = await asyncio.wait_for(
+                enrich(business, http), timeout=PER_BUSINESS_BUDGET
+            )
+    except (TimeoutError, asyncio.TimeoutError, Exception) as exc:  # noqa: BLE001
+        # Enrichment is a nice-to-have. Never fail a row over someone else's
+        # unreachable website.
+        log.info("enrichment skipped for %s: %s", business.website, exc)
+        return {"business": business.model_dump(), "enriched": False}
+
+    return {"business": enriched.model_dump(), "enriched": enriched != business}
 
 
 @app.post("/businesses/{row_id}/summarize")
@@ -395,43 +408,43 @@ async def summarize_row(row_id: str, body: RowRequest) -> dict:
     updated = _store.update_fields(
         row_id, {"sources": {**updated.sources, "short_info": url}}
     )
-    _resync(body.workbook)
     return {"business": updated.model_dump(), "summarized": True}
 
 
 @app.post("/workbooks/open")
 def open_workbook(body: RowRequest) -> dict:
-    """Adopt any hand-typed rows, then return the workbook's saved rows."""
+    """Return a workbook's saved rows.
+
+    There is no adoption step any more: the .xlsx is generated at download and
+    never stored, so there is no file anyone could have typed rows into.
+    """
     try:
-        target = wb.resolve_path(body.workbook, require_xlsx=True)
+        target = wb.validate(body.workbook, require_xlsx=True)
     except wb.InvalidPath as exc:
         raise HTTPException(400, str(exc)) from exc
-
-    adopted = _store.adopt(body.workbook, target) if target.exists() else 0
-    rows = _store.all(body.workbook)
+    rows = _store.all(target)
     return {
-        "workbook": body.workbook,
-        "adopted": adopted,
+        "workbook": target,
+        "adopted": 0,
         "count": len(rows),
         "businesses": [b.model_dump() for b in rows],
     }
-
 
 # --- workbook management ---------------------------------------------------
 
 
 @app.get("/workbooks")
 def workbooks_tree() -> dict:
-    return wb.tree()
+    return wb.tree(_store)
 
 
 @app.post("/workbooks")
 def workbooks_create(body: WorkbookRequest) -> dict:
     try:
         path = (
-            wb.create_folder(body.path)
+            wb.create_folder(_store, body.path)
             if body.kind == "folder"
-            else wb.create_workbook(body.path)
+            else wb.create_workbook(_store, body.path)
         )
     except wb.InvalidPath as exc:
         raise HTTPException(400, str(exc)) from exc
@@ -441,45 +454,43 @@ def workbooks_create(body: WorkbookRequest) -> dict:
 @app.patch("/workbooks")
 def workbooks_move(body: MoveRequest) -> dict:
     try:
-        path = wb.rename_or_move(body.src, body.dst)
+        path = wb.rename_or_move(_store, body.src, body.dst)
     except wb.InvalidPath as exc:
         raise HTTPException(400, str(exc)) from exc
-    # Rows follow the file, or the renamed workbook renders empty.
-    moved = _store.move_rows(body.src, path)
-    if path.endswith(".xlsx"):
-        excel.sync(_store.all(path), wb.resolve_path(path, require_xlsx=True))
-    return {"path": path, "rows_moved": moved}
+    # ON UPDATE CASCADE already carried the rows across.
+    return {"path": path, "rows_moved": len(_store.all(path))}
 
 
 @app.delete("/workbooks")
 def workbooks_delete(body: WorkbookRequest) -> dict:
     try:
         if body.kind == "folder":
-            wb.delete_folder(body.path)
+            wb.delete_folder(_store, body.path)
             return {"deleted": body.path, "kind": "folder"}
-        trashed = wb.delete_workbook(body.path)
+        removed = wb.delete_workbook(_store, body.path)
     except wb.InvalidPath as exc:
         raise HTTPException(400, str(exc)) from exc
-    return {
-        "deleted": body.path,
-        "kind": "workbook",
-        "trashed_as": trashed,
-        "rows_removed": _store.delete_rows(body.path),
-    }
+    # Soft delete: the rows are hidden, not destroyed.
+    return {"deleted": body.path, "kind": "workbook", "rows_removed": removed}
 
 
 @app.get("/workbooks/download")
 def workbooks_download(path: str):
+    """Build the workbook in memory and stream it. Nothing is stored."""
     try:
-        target = wb.resolve_path(path, must_exist=True, require_xlsx=True)
+        target = wb.validate(path, require_xlsx=True)
     except wb.InvalidPath as exc:
         raise HTTPException(400, str(exc)) from exc
-    return FileResponse(
-        target,
+    payload = excel.build(_store.all(target))
+    return Response(
+        content=payload,
         media_type=(
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         ),
-        filename=target.name,
+        headers={
+            "Content-Disposition":
+                f'attachment; filename="{target.rsplit("/", 1)[-1]}"'
+        },
     )
 
 

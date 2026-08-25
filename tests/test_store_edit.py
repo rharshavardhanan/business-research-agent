@@ -1,14 +1,7 @@
 import pytest
 
 from app.models import Business
-from app.store import DuplicateId, InvalidField, Store
-
-
-@pytest.fixture
-def store(tmp_path):
-    return Store(tmp_path / "t.db")
-
-
+from app.store import DuplicateId, InvalidField
 def seed(store, **kw):
     kw.setdefault("business_name", "ABC Dental")
     return store.upsert_many([Business(**kw)], "b.xlsx")[0][0]
@@ -170,3 +163,31 @@ def test_outreach_fields_do_not_disturb_the_record_status(store):
     row = seed(store)
     out = store.update_fields(row.id, {"call_status": "Picked up"})
     assert out.status == "new", "record status is not the call status"
+
+
+# --- Postgres-specific behaviour -------------------------------------------
+
+
+def test_types_come_back_native_not_text(store):
+    store.upsert_many([Business(business_name="ABC", rating=4.9, review_count=568,
+                                latitude=13.05, follow_up=True)], "b.xlsx")
+    row = store.all("b.xlsx")[0]
+    assert isinstance(row.rating, float) and row.rating == 4.9
+    assert isinstance(row.review_count, int) and row.review_count == 568
+    assert isinstance(row.latitude, float)
+    assert row.follow_up is True
+
+
+def test_deleted_rows_are_hidden_not_destroyed(store):
+    store.upsert_many([Business(business_name="ABC")], "b.xlsx")
+    row = store.all("b.xlsx")[0]
+    assert store.delete_row(row.id) is True
+    assert store.all("b.xlsx") == []
+    assert store.count_deleted() == 1
+
+
+def test_schema_init_is_idempotent(store):
+    store.init_schema()
+    store.init_schema()
+    store.upsert_many([Business(business_name="ABC")], "b.xlsx")
+    assert len(store.all()) == 1

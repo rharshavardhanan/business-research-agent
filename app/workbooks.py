@@ -1,152 +1,177 @@
-"""Workbook and folder management on disk.
+"""Workbook and folder management, stored as rows rather than files.
 
-Owns the filesystem so `store.py` can stay about rows and `excel.py` about
-rendering. Its most important job is `resolve_path`: every path in this module
-arrives from a browser and is untrusted until proven to live inside DATA_DIR.
+There is no filesystem on serverless hosting, so a workbook is a row in the
+`workbooks` table whose `path` may contain slashes. Folders are path prefixes,
+not directories: `dental/chennai.xlsx` is one row, and the tree is built by
+splitting on `/`.
+
+An empty folder is a row whose path has no `.xlsx` suffix — that is what lets a
+folder exist before anything is put in it.
 """
 
-import os
-import shutil
-from datetime import datetime
-from pathlib import Path
+import re
 
-from app import excel
+DEFAULT_WORKBOOK = "businesses.xlsx"
 
-DATA_DIR = Path(os.environ.get("DATA_DIR", "data"))
-TRASH_DIR_NAME = ".trash"
+# A path is still a key, so it still has to be sane. Without a directory to
+# escape this is no longer a filesystem trust boundary, but a path with `..`
+# or empty segments produces keys nobody can address.
+_SEGMENT = re.compile(r"^[A-Za-z0-9 ._&()\-]+$")
 
-# Never listed, never a valid target: the database is not a workbook, and the
-# trash is a backup the user reaches through Finder, not through the app.
-RESERVED = {"leads.db", TRASH_DIR_NAME}
+MAX_PATH_LENGTH = 250
 
 
 class InvalidPath(ValueError):
-    """A client-supplied path escaped DATA_DIR or named a reserved entry."""
+    """A client-supplied path is not a usable workbook key."""
 
 
-def resolve_path(
-    rel: str, *, must_exist: bool = False, require_xlsx: bool = False
-) -> Path:
-    """Validate an untrusted relative path and return it resolved inside DATA_DIR.
-
-    This is a trust boundary. `/workbooks/download` streams whatever this
-    returns, so without it the endpoint serves any file the process can read.
-    """
-    if not rel or not rel.strip():
+def validate(path: str, *, require_xlsx: bool = False) -> str:
+    """Return the normalised path, or raise InvalidPath."""
+    if not path or not path.strip():
         raise InvalidPath("A path is required.")
-    rel = rel.strip().replace("\\", "/")
+    candidate = path.strip().replace("\\", "/")
 
-    if rel.startswith("/") or ":" in rel.split("/")[0]:
+    if candidate.startswith("/"):
         raise InvalidPath("Absolute paths are not allowed.")
+    if len(candidate) > MAX_PATH_LENGTH:
+        raise InvalidPath(f"Path is too long (limit {MAX_PATH_LENGTH} characters).")
 
-    parts = [p for p in rel.split("/") if p not in ("", ".")]
-    if not parts or any(p == ".." for p in parts):
+    segments = candidate.split("/")
+    if any(s.strip() == "" for s in segments):
+        raise InvalidPath("Path has an empty segment.")
+    if any(s.strip() in (".", "..") for s in segments):
         raise InvalidPath("Path traversal is not allowed.")
-    if parts[0] in RESERVED:
-        raise InvalidPath(f"{parts[0]!r} is reserved.")
-    if require_xlsx and not parts[-1].endswith(".xlsx"):
-        raise InvalidPath("A workbook must end in .xlsx")
+    for segment in segments:
+        if not _SEGMENT.match(segment.strip()):
+            raise InvalidPath(f"{segment!r} contains characters that are not allowed.")
 
-    base = DATA_DIR.resolve()
-    base.mkdir(parents=True, exist_ok=True)
-    # resolve() follows symlinks before the containment check below, so a
-    # symlink pointing outside DATA_DIR is caught here too.
-    target = (base / "/".join(parts)).resolve()
-    if target != base and base not in target.parents:
-        raise InvalidPath("Path escapes the data directory.")
-    if must_exist and not target.exists():
-        raise InvalidPath(f"{rel!r} does not exist.")
+    normalised = "/".join(s.strip() for s in segments)
+    if require_xlsx and not normalised.endswith(".xlsx"):
+        raise InvalidPath("A workbook must end in .xlsx")
+    return normalised
+
+
+def is_workbook(path: str) -> bool:
+    return path.endswith(".xlsx")
+
+
+def list_paths(store) -> list[str]:
+    with store._conn() as conn:
+        rows = conn.execute(
+            "SELECT path FROM workbooks WHERE deleted_at IS NULL ORDER BY path"
+        ).fetchall()
+    return [r["path"] for r in rows]
+
+
+def tree(store) -> dict:
+    """Nest the flat path list into the shape the sidebar renders."""
+    root: dict = {"name": "", "path": "", "type": "folder", "children": []}
+
+    for path in list_paths(store):
+        segments = path.split("/")
+        node = root
+        for depth, segment in enumerate(segments):
+            partial = "/".join(segments[: depth + 1])
+            last = depth == len(segments) - 1
+
+            if last and is_workbook(path):
+                node["children"].append(
+                    {"name": segment, "path": partial, "type": "workbook"}
+                )
+                break
+
+            existing = next(
+                (c for c in node["children"]
+                 if c["type"] == "folder" and c["name"] == segment),
+                None,
+            )
+            if existing is None:
+                existing = {"name": segment, "path": partial,
+                            "type": "folder", "children": []}
+                node["children"].append(existing)
+            node = existing
+
+    _sort(root)
+    return root
+
+
+def _sort(node: dict) -> None:
+    node["children"].sort(key=lambda c: (c["type"] != "folder", c["name"].lower()))
+    for child in node["children"]:
+        if child["type"] == "folder":
+            _sort(child)
+
+
+def create_workbook(store, path: str) -> str:
+    target = validate(path, require_xlsx=True)
+    if target in list_paths(store):
+        raise InvalidPath(f"{target!r} already exists.")
+    store.ensure_workbook(target)
     return target
 
 
-def tree() -> dict:
-    """The workbook tree the sidebar renders. Reserved and dotted names omitted."""
-    base = DATA_DIR.resolve()
-    base.mkdir(parents=True, exist_ok=True)
-    return {"name": "", "path": "", "type": "folder", "children": _children(base, base)}
+def create_folder(store, path: str) -> str:
+    target = validate(path)
+    if is_workbook(target):
+        raise InvalidPath("A folder name must not end in .xlsx")
+    if target in list_paths(store):
+        raise InvalidPath(f"{target!r} already exists.")
+    store.ensure_workbook(target)
+    return target
 
 
-def _children(folder: Path, base: Path) -> list[dict]:
-    out: list[dict] = []
-    for entry in sorted(folder.iterdir(), key=lambda p: (p.is_file(), p.name.lower())):
-        if entry.name in RESERVED or entry.name.startswith("."):
-            continue
-        rel = entry.relative_to(base).as_posix()
-        if entry.is_dir():
-            out.append(
-                {
-                    "name": entry.name,
-                    "path": rel,
-                    "type": "folder",
-                    "children": _children(entry, base),
-                }
+def rename_or_move(store, src: str, dst: str) -> str:
+    source = validate(src)
+    target = validate(dst, require_xlsx=is_workbook(source))
+    existing = list_paths(store)
+    if source not in existing:
+        raise InvalidPath(f"{source!r} does not exist.")
+    if target in existing:
+        raise InvalidPath(f"{target!r} already exists.")
+
+    with store._conn() as conn:
+        # ON UPDATE CASCADE carries the businesses across, so no second
+        # statement is needed to keep the rows with their workbook.
+        conn.execute("UPDATE workbooks SET path = %s WHERE path = %s", (target, source))
+        if not is_workbook(source):
+            # Renaming a folder moves everything filed beneath it.
+            conn.execute(
+                "UPDATE workbooks SET path = %s || substring(path from %s) "
+                "WHERE path LIKE %s",
+                (target, len(source) + 1, f"{source}/%"),
             )
-        elif entry.suffix == ".xlsx":
-            out.append(
-                {
-                    "name": entry.name,
-                    "path": rel,
-                    "type": "workbook",
-                    "size": entry.stat().st_size,
-                }
-            )
-    return out
+        conn.commit()
+    return target
 
 
-def create_workbook(rel: str) -> str:
-    target = resolve_path(rel, require_xlsx=True)
-    if target.exists():
-        raise InvalidPath(f"{rel!r} already exists.")
-    target.parent.mkdir(parents=True, exist_ok=True)
-    # Reuse excel.sync so a new workbook gets the same headers, freeze pane,
-    # autofilter and widths as one the app has been writing to for months.
-    excel.sync([], target)
-    return _rel(target)
-
-
-def create_folder(rel: str) -> str:
-    target = resolve_path(rel)
-    if target.exists():
-        raise InvalidPath(f"{rel!r} already exists.")
-    target.mkdir(parents=True)
-    return _rel(target)
-
-
-def rename_or_move(src: str, dst: str) -> str:
-    source = resolve_path(src, must_exist=True)
-    target = resolve_path(dst, require_xlsx=source.is_file())
-    if target.exists():
-        raise InvalidPath(f"{dst!r} already exists.")
-    target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(source), str(target))
-    return _rel(target)
-
-
-def delete_workbook(rel: str) -> str:
-    """Move the workbook to .trash and return its trashed filename.
-
-    Never unlinks. The .xlsx holds every field the database does, so the
-    trashed file is a complete backup of a list the user may have hand-edited.
-    """
-    source = resolve_path(rel, must_exist=True, require_xlsx=True)
-    trash = DATA_DIR.resolve() / TRASH_DIR_NAME
-    trash.mkdir(parents=True, exist_ok=True)
-    name = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{source.name}"
-    shutil.move(str(source), str(trash / name))
-    return name
-
-
-def delete_folder(rel: str) -> None:
-    """Delete an empty folder. Recursive deletion of lead lists is not offered."""
-    target = resolve_path(rel, must_exist=True)
-    if not target.is_dir():
-        raise InvalidPath(f"{rel!r} is not a folder.")
-    if any(target.iterdir()):
-        raise InvalidPath(
-            f"{rel!r} is not empty. Delete or move what is inside it first."
+def delete_workbook(store, path: str) -> int:
+    """Soft-delete a workbook and its rows. Returns how many rows were hidden."""
+    target = validate(path, require_xlsx=True)
+    if target not in list_paths(store):
+        raise InvalidPath(f"{target!r} does not exist.")
+    removed = store.delete_rows(target)
+    with store._conn() as conn:
+        conn.execute(
+            "UPDATE workbooks SET deleted_at = now() WHERE path = %s", (target,)
         )
-    target.rmdir()
+        conn.commit()
+    return removed
 
 
-def _rel(path: Path) -> str:
-    return path.relative_to(DATA_DIR.resolve()).as_posix()
+def delete_folder(store, path: str) -> None:
+    """Delete an empty folder. Recursive deletion of lead lists is not offered."""
+    target = validate(path)
+    paths = list_paths(store)
+    if target not in paths:
+        raise InvalidPath(f"{target!r} does not exist.")
+    if is_workbook(target):
+        raise InvalidPath(f"{target!r} is a workbook, not a folder.")
+    if any(p.startswith(f"{target}/") for p in paths):
+        raise InvalidPath(
+            f"{target!r} is not empty. Delete or move what is inside it first."
+        )
+    with store._conn() as conn:
+        conn.execute(
+            "UPDATE workbooks SET deleted_at = now() WHERE path = %s", (target,)
+        )
+        conn.commit()

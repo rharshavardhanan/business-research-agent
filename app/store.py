@@ -1,37 +1,55 @@
-"""SQLite master store - the application's source of truth.
+"""Postgres store — the application's source of truth.
 
-Excel is a rendered view of this, not the other way round. Keeping state here
-means a filter is a query rather than a full workbook re-parse, and a crash
-mid-write cannot corrupt the user's lead sheet.
+Rewritten from SQLite for serverless hosting, where there is no persistent disk.
+Two behavioural differences matter:
+
+* Columns carry real types. The SQLite version stored everything as TEXT and
+  coerced on read; that coercion is gone, not relocated.
+* Deletes are soft. `deleted_at` replaces the `.trash/` directory, so a deleted
+  workbook is recoverable by clearing one column.
 """
 
 import json
-import sqlite3
 from datetime import date
-from pathlib import Path
 from uuid import uuid4
+
+import psycopg
+from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 
 from app.dedupe import find_match, merge
 from app.models import Business, MatchTag
 from app.normalize import normalize_phone
 
-_FIELDS = list(Business.model_fields)
-
 DEFAULT_WORKBOOK = "businesses.xlsx"
 
-# Stored as floats on the model; a non-numeric value here fails validation on the
-# next read and makes the whole workbook unreadable, not just the one cell.
+# Everything else is TEXT. Getting these right is the point of the migration:
+# a rating that sorts as text puts "5" below "4.9".
+_TYPES = {
+    "latitude": "DOUBLE PRECISION",
+    "longitude": "DOUBLE PRECISION",
+    "rating": "REAL",
+    "review_count": "INTEGER",
+    "follow_up": "BOOLEAN",
+    "sources": "JSONB",
+}
+
+_FIELDS = list(Business.model_fields)
+# `id` and `workbook` are declared explicitly in the schema below.
+_DATA_FIELDS = [f for f in _FIELDS if f not in ("id", "workbook")]
+
+_FILTERS = {
+    "without_website": "(website IS NULL OR website = '')",
+    "with_phone": "(phone IS NOT NULL AND phone != '')",
+    "without_doctor": "(doctor_name IS NULL OR doctor_name = '')",
+}
+
 _NUMERIC_FIELDS = {"latitude", "longitude"}
 
-# Deliberately NOT reusing `status`, which holds new/review/manual - how the
-# record entered the system. Overloading it would break the review workflow.
 CALL_STATUSES = ("Not called", "Picked up", "No answer", "Wrong number")
 INTEREST_VALUES = ("Yes", "No")
 
-_CHOICES = {
-    "call_status": CALL_STATUSES,
-    "will_speak_further": INTEREST_VALUES,
-}
+_CHOICES = {"call_status": CALL_STATUSES, "will_speak_further": INTEREST_VALUES}
 _BOOL_FIELDS = {"follow_up"}
 
 
@@ -42,71 +60,83 @@ class DuplicateId(ValueError):
 class InvalidField(ValueError):
     """An edit named an unknown field, or a value that cannot be stored."""
 
-_FILTERS = {
-    "without_website": "website IS NULL OR website = ''",
-    "with_phone": "phone IS NOT NULL AND phone != ''",
-    "without_doctor": "doctor_name IS NULL OR doctor_name = ''",
-}
+
+def _column_ddl() -> str:
+    return ", ".join(f"{f} {_TYPES.get(f, 'TEXT')}" for f in _DATA_FIELDS)
+
+
+SCHEMA = f"""
+CREATE TABLE IF NOT EXISTS workbooks (
+    path       TEXT PRIMARY KEY,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    deleted_at TIMESTAMPTZ
+);
+CREATE TABLE IF NOT EXISTS businesses (
+    id         TEXT PRIMARY KEY,
+    workbook   TEXT NOT NULL REFERENCES workbooks(path)
+                    ON UPDATE CASCADE ON DELETE CASCADE,
+    deleted_at TIMESTAMPTZ,
+    {_column_ddl()}
+);
+CREATE INDEX IF NOT EXISTS businesses_workbook_idx
+    ON businesses (workbook) WHERE deleted_at IS NULL;
+"""
 
 
 class Store:
-    def __init__(self, db_path: Path | str):
-        self.path = Path(db_path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        cols = ", ".join(
-            f"{f} TEXT PRIMARY KEY" if f == "id" else f"{f} TEXT" for f in _FIELDS
-        )
+    def __init__(self, dsn: str):
+        self.dsn = dsn
+
+    def _conn(self):
+        # A new connection per operation: a serverless instance cannot keep a
+        # pool alive between invocations, and Neon's pooled endpoint expects it.
+        return psycopg.connect(self.dsn, row_factory=dict_row)
+
+    def init_schema(self) -> None:
+        """Create the tables. Idempotent, safe to call on every cold start."""
         with self._conn() as conn:
-            conn.execute(f"CREATE TABLE IF NOT EXISTS businesses ({cols})")
-            self._migrate(conn)
-
-    @staticmethod
-    def _migrate(conn: sqlite3.Connection) -> None:
-        """Add the workbook column to a pre-multi-workbook database.
-
-        Idempotent. Existing rows are filed under the default workbook so they
-        keep rendering instead of orphaning into a workbook nobody selects.
-        """
-        existing = {row[1] for row in conn.execute("PRAGMA table_info(businesses)")}
-        for field in _FIELDS:
-            if field not in existing:
-                conn.execute(f"ALTER TABLE businesses ADD COLUMN {field} TEXT")
-        # Only `workbook` needs a backfill: without one its rows would orphan
-        # into a workbook nobody selects.
-        conn.execute(
-            "UPDATE businesses SET workbook = ? WHERE workbook IS NULL",
-            (DEFAULT_WORKBOOK,),
-        )
-
-    def _conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path)
-        conn.row_factory = sqlite3.Row
-        return conn
+            conn.execute(SCHEMA)
+            conn.commit()
 
     # -- reading ---------------------------------------------------------
 
     def all(self, workbook: str | None = None) -> list[Business]:
-        sql, params = "SELECT * FROM businesses", ()
+        sql = "SELECT * FROM businesses WHERE deleted_at IS NULL"
+        params: tuple = ()
         if workbook:
-            sql += " WHERE workbook = ?"
+            sql += " AND workbook = %s"
             params = (workbook,)
+        sql += " ORDER BY date_found NULLS LAST, business_name"
         with self._conn() as conn:
-            rows = conn.execute(sql, params).fetchall()
-        return [_from_row(r) for r in rows]
+            return [_to_business(r) for r in conn.execute(sql, params).fetchall()]
 
     def filter(self, kind: str, workbook: str | None = None) -> list[Business]:
         where = _FILTERS.get(kind)
         if where is None:
             raise ValueError(f"unknown filter: {kind!r}. Expected one of {sorted(_FILTERS)}")
-        sql, params = f"SELECT * FROM businesses WHERE ({where})", ()
+        sql = f"SELECT * FROM businesses WHERE deleted_at IS NULL AND {where}"
+        params: tuple = ()
         if workbook:
-            sql += " AND workbook = ?"
+            sql += " AND workbook = %s"
             params = (workbook,)
         with self._conn() as conn:
-            rows = conn.execute(sql, params).fetchall()
-        return [_from_row(r) for r in rows]
+            return [_to_business(r) for r in conn.execute(sql, params).fetchall()]
+
+    def count_deleted(self) -> int:
+        with self._conn() as conn:
+            return conn.execute(
+                "SELECT count(*) AS n FROM businesses WHERE deleted_at IS NOT NULL"
+            ).fetchone()["n"]
 
     # -- writing ---------------------------------------------------------
+
+    def ensure_workbook(self, path: str) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO workbooks (path) VALUES (%s) ON CONFLICT (path) DO NOTHING",
+                (path,),
+            )
+            conn.commit()
 
     def upsert_many(
         self, items: list[Business], workbook: str = DEFAULT_WORKBOOK
@@ -114,16 +144,17 @@ class Store:
         """Insert, update, or recognise each incoming business in one workbook.
 
         `known` holds only that workbook's rows, so `find_match` can only ever
-        match within it. That is what makes dedupe per-workbook without
-        `dedupe.py` knowing workbooks exist at all.
+        match within it - which is what makes dedupe per-workbook without
+        `dedupe.py` knowing workbooks exist.
         """
+        self.ensure_workbook(workbook)
         known = self.all(workbook)
         results: list[tuple[Business, MatchTag]] = []
         today = date.today().isoformat()
 
         with self._conn() as conn:
             for item in items:
-                match, confidence, _tier = find_match(item, known)
+                match, confidence, _ = find_match(item, known)
 
                 if confidence == "high" and match is not None:
                     merged, changed = merge(match, item)
@@ -141,14 +172,13 @@ class Store:
                         "id": item.id or uuid4().hex,
                         "date_found": item.date_found or today,
                         "last_updated": today,
-                        # MEDIUM matches are kept as their own row and flagged,
-                        # never merged and never dropped.
                         "status": "review" if confidence == "medium" else (item.status or "new"),
                     }
                 )
                 _insert(conn, record)
                 known.append(record)
                 results.append((record, "review" if confidence == "medium" else "new"))
+            conn.commit()
 
         return results
 
@@ -178,15 +208,10 @@ class Store:
             if value in (None, ""):
                 if field == "id":
                     raise InvalidField("id cannot be empty")
-                # A cleared cell is missing data, never an empty string. A bool
-                # has no "missing" - an unticked box is False.
                 updates[field] = False if field in _BOOL_FIELDS else None
                 continue
 
             if field in _CHOICES:
-                # The API is reachable without the UI, so the allowed values are
-                # enforced here or the column degrades into free text that never
-                # groups or filters together.
                 if value not in _CHOICES[field]:
                     raise InvalidField(
                         f"{field} must be one of: {', '.join(_CHOICES[field])}"
@@ -211,9 +236,6 @@ class Store:
                         f"{field} must be a number or blank, got {raw!r}"
                     ) from exc
             elif field in ("phone", "alternate_phone"):
-                # Dedupe matches the normalized form, so an un-normalized edit
-                # would silently stop matching. Keep the raw text when it cannot
-                # be normalized rather than discarding what the user typed.
                 value = normalize_phone(value) or value
 
             updates[field] = value
@@ -236,23 +258,36 @@ class Store:
         )
         with self._conn() as conn:
             if updated.id != row_id:
-                conn.execute("DELETE FROM businesses WHERE id = ?", (row_id,))
+                conn.execute("DELETE FROM businesses WHERE id = %s", (row_id,))
                 _insert(conn, updated)
             else:
                 _update(conn, updated)
+            conn.commit()
         return updated
 
     def delete_row(self, row_id: str) -> bool:
         with self._conn() as conn:
-            return (
-                conn.execute(
-                    "DELETE FROM businesses WHERE id = ?", (row_id,)
-                ).rowcount
-                > 0
+            cur = conn.execute(
+                "UPDATE businesses SET deleted_at = now() "
+                "WHERE id = %s AND deleted_at IS NULL",
+                (row_id,),
             )
+            conn.commit()
+            return cur.rowcount > 0
 
-    def create_blank(self, workbook: str) -> Business:
+    def delete_rows(self, workbook: str) -> int:
+        with self._conn() as conn:
+            cur = conn.execute(
+                "UPDATE businesses SET deleted_at = now() "
+                "WHERE workbook = %s AND deleted_at IS NULL",
+                (workbook,),
+            )
+            conn.commit()
+            return cur.rowcount
+
+    def create_blank(self, workbook: str = DEFAULT_WORKBOOK) -> Business:
         """An empty row the user fills in by hand, for a lead found offline."""
+        self.ensure_workbook(workbook)
         today = date.today().isoformat()
         row = Business(
             business_name="",
@@ -264,50 +299,28 @@ class Store:
         )
         with self._conn() as conn:
             _insert(conn, row)
+            conn.commit()
         return row
 
-    def adopt(self, workbook: str, path) -> int:
-        """Import rows typed straight into the .xlsx. Returns how many were new.
-
-        Routed through upsert_many, so a hand-typed row duplicating an existing
-        lead merges instead of doubling - the same rule as every other path.
-        Idempotent: once adopted a row has an ID and is never seen again here.
-        """
-        from app import excel
-
-        orphans = [r for r in excel.read_rows(path) if not r.get("id")]
-        if not orphans:
-            return 0
-
-        candidates = [Business(**{**r, "id": None}) for r in orphans]
-        tagged = self.upsert_many(candidates, workbook)
-
-        # Consume the source rows and re-render. Without this the ID-less
-        # originals stay in the sheet and are adopted again on every open.
-        excel.delete_orphan_rows(path)
-        excel.sync(self.all(workbook), path)
-
-        return sum(1 for _, tag in tagged if tag in ("new", "review"))
-
     def move_rows(self, src: str, dst: str) -> int:
-        """Re-file rows when their workbook is renamed or moved."""
-        with self._conn() as conn:
-            return conn.execute(
-                "UPDATE businesses SET workbook = ? WHERE workbook = ?", (dst, src)
-            ).rowcount
+        """Re-file rows when a workbook is renamed.
 
-    def delete_rows(self, workbook: str) -> int:
+        Normally unnecessary - the foreign key's ON UPDATE CASCADE does it - but
+        kept for callers that move rows without renaming the workbook row.
+        """
         with self._conn() as conn:
-            return conn.execute(
-                "DELETE FROM businesses WHERE workbook = ?", (workbook,)
-            ).rowcount
+            cur = conn.execute(
+                "UPDATE businesses SET workbook = %s WHERE workbook = %s", (dst, src)
+            )
+            conn.commit()
+            return cur.rowcount
 
     def dedupe_existing(self, workbook: str | None = None) -> int:
         """Collapse HIGH-confidence duplicates within a workbook.
 
-        Returns the number of rows removed. MEDIUM and LOW pairs are untouched -
-        this method never deletes a row the tier hierarchy is unsure about.
-        Rows in different workbooks are never duplicates of each other.
+        MEDIUM and LOW pairs are untouched - this never removes a row the tier
+        hierarchy is unsure about. Rows in different workbooks are never
+        duplicates of each other.
         """
         rows = self.all(workbook)
         removed = 0
@@ -320,44 +333,40 @@ class Store:
                     if changed:
                         _update(conn, merged)
                         kept[kept.index(match)] = merged
-                    conn.execute("DELETE FROM businesses WHERE id = ?", (row.id,))
+                    conn.execute(
+                        "UPDATE businesses SET deleted_at = now() WHERE id = %s",
+                        (row.id,),
+                    )
                     removed += 1
                 else:
                     kept.append(row)
+            conn.commit()
         return removed
 
 
 # -- row <-> model ------------------------------------------------------
 
 
-def _from_row(row: sqlite3.Row) -> Business:
-    data = dict(row)
-    data["sources"] = json.loads(data.get("sources") or "{}")
-    # SQLite stores every column as TEXT here; coerce back to the model's types.
-    for numeric in ("latitude", "longitude", "rating"):
-        if data.get(numeric) not in (None, ""):
-            data[numeric] = float(data[numeric])
-    if data.get("review_count") not in (None, ""):
-        data["review_count"] = int(float(data["review_count"]))
-    raw = data.get("follow_up")
-    data["follow_up"] = (
-        str(raw).strip().lower() in ("true", "1", "yes") if raw is not None else False
-    )
+def _to_business(row: dict) -> Business:
+    """Postgres returns native types, so there is nothing to coerce."""
+    data = {k: v for k, v in row.items() if k in Business.model_fields}
+    data["sources"] = data.get("sources") or {}
+    data["follow_up"] = bool(data.get("follow_up"))
     return Business(**data)
 
 
-def _to_params(b: Business) -> dict:
+def _params(b: Business) -> dict:
     data = b.model_dump()
-    data["sources"] = json.dumps(data["sources"])
+    data["sources"] = Jsonb(data.get("sources") or {})
     return data
 
 
-def _insert(conn: sqlite3.Connection, b: Business) -> None:
+def _insert(conn, b: Business) -> None:
     cols = ", ".join(_FIELDS)
-    placeholders = ", ".join(f":{f}" for f in _FIELDS)
-    conn.execute(f"INSERT INTO businesses ({cols}) VALUES ({placeholders})", _to_params(b))
+    placeholders = ", ".join(f"%({f})s" for f in _FIELDS)
+    conn.execute(f"INSERT INTO businesses ({cols}) VALUES ({placeholders})", _params(b))
 
 
-def _update(conn: sqlite3.Connection, b: Business) -> None:
-    assignments = ", ".join(f"{f} = :{f}" for f in _FIELDS if f != "id")
-    conn.execute(f"UPDATE businesses SET {assignments} WHERE id = :id", _to_params(b))
+def _update(conn, b: Business) -> None:
+    assignments = ", ".join(f"{f} = %({f})s" for f in _FIELDS if f != "id")
+    conn.execute(f"UPDATE businesses SET {assignments} WHERE id = %(id)s", _params(b))

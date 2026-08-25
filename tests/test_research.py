@@ -1,6 +1,5 @@
 from app.models import Business, Command
 from app.research import research
-from app.store import Store
 
 
 class _FakeProvider:
@@ -13,16 +12,10 @@ class _FakeProvider:
         ]
 
 
-async def _passthrough(businesses):
-    return businesses
-
-
-async def test_research_tags_against_store_without_writing(tmp_path, monkeypatch):
-    store = Store(tmp_path / "t.db")
+async def test_research_tags_against_store_without_writing(store, monkeypatch):
     store.upsert_many([Business(business_name="ABC Dental", phone="+919876543210")])
 
     monkeypatch.setattr("app.research.get_provider", lambda name=None: _FakeProvider())
-    monkeypatch.setattr("app.research.enrich_all", _passthrough)
 
     out = await research(
         Command(action="search", business_type="dental clinic", location="Chromepet"),
@@ -34,7 +27,7 @@ async def test_research_tags_against_store_without_writing(tmp_path, monkeypatch
     assert len(store.all()) == 1, "research must not write to the store"
 
 
-async def test_research_collapses_duplicates_within_one_batch(tmp_path, monkeypatch):
+async def test_research_collapses_duplicates_within_one_batch(store, monkeypatch):
     class DupProvider:
         name = "dup"
 
@@ -45,15 +38,14 @@ async def test_research_collapses_duplicates_within_one_batch(tmp_path, monkeypa
             ]
 
     monkeypatch.setattr("app.research.get_provider", lambda name=None: DupProvider())
-    monkeypatch.setattr("app.research.enrich_all", _passthrough)
 
     out = await research(
-        Command(action="search", business_type="x", location="y"), Store(tmp_path / "t.db")
+        Command(action="search", business_type="x", location="y"), store
     )
     assert len(out) == 1, "one search returning the same clinic twice yields one row"
 
 
-async def test_research_normalizes_provider_output(tmp_path, monkeypatch):
+async def test_research_normalizes_provider_output(store, monkeypatch):
     class RawProvider:
         name = "raw"
 
@@ -61,9 +53,8 @@ async def test_research_normalizes_provider_output(tmp_path, monkeypatch):
             return [Business(business_name="Raw", phone="098765 43210")]
 
     monkeypatch.setattr("app.research.get_provider", lambda name=None: RawProvider())
-    monkeypatch.setattr("app.research.enrich_all", _passthrough)
 
     out = await research(
-        Command(action="search", business_type="x", location="y"), Store(tmp_path / "t.db")
+        Command(action="search", business_type="x", location="y"), store
     )
     assert out[0].business.phone == "+919876543210"

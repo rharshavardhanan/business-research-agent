@@ -648,6 +648,7 @@ const statusEl = $('status'), results = $('results');
 const actionbar = $('actionbar'), saveBtn = $('save'), saveNote = $('savenote');
 const treeEl = $('tree');
 let _buffer = [];
+let lastSummary = null;
 
 const DASH = '—';
 const NUMERIC_FIELDS = new Set(['rating', 'review_count', 'latitude', 'longitude']);
@@ -834,10 +835,12 @@ function handleResponse(data) {
   if (data.action === 'search') {
     statusEl.innerHTML = summaryLine(data.count, data.summary) + noticeLine(data.notice);
     _buffer = data.businesses;
+    lastSummary = data.summary;
     renderTable(data.businesses, {
       emptyText: 'No businesses matched. Try a broader area, or switch to the Google Places provider.',
     });
     setSaveState(data.businesses);
+    enrichAll();
     return;
   }
 
@@ -867,6 +870,55 @@ function handleResponse(data) {
   statusEl.innerHTML = `<div class="summary">${esc(JSON.stringify(data))}</div>`;
 }
 
+/**
+ * Enrichment runs one request per business, driven from here.
+ *
+ * The server used to crawl every site inside the search request, which cannot
+ * fit a serverless function timeout. Doing it per business means results appear
+ * immediately, detail fills in as it arrives, and one slow site delays one row
+ * instead of the whole search.
+ */
+async function enrichAll() {
+  const targets = _buffer
+    .map((row, i) => [i, row])
+    .filter(([, row]) => row && row.website);
+  if (!targets.length) return;
+
+  const total = targets.length;
+  const queue = targets.slice();
+  let done = 0;
+
+  const progress = () => {
+    statusEl.innerHTML = summaryLine(_buffer.length, lastSummary) +
+      (done < total
+        ? `<div class="notice">Reading websites… ${done} of ${total}</div>`
+        : '');
+  };
+
+  const worker = async () => {
+    while (queue.length) {
+      const [i, row] = queue.shift();
+      try {
+        const out = await call('/enrich', { business: row });
+        // Keep the tag: it describes this row against the workbook, and the
+        // server has no idea what it was.
+        _buffer[i] = { ...out.business, tag: row.tag };
+      } catch (err) {
+        // Someone else's unreachable site must never break the batch.
+      }
+      done += 1;
+      progress();
+      renderTable(_buffer, { emptyText: 'No results.' });
+      setSaveState(_buffer);
+    }
+  };
+
+  progress();
+  // Four at a time: enough to be quick, few enough to stay a polite guest.
+  await Promise.all(Array.from({ length: 4 }, worker));
+  progress();
+}
+
 function reportSave(counts) {
   _buffer = [];
   const written = (counts.new || 0) + (counts.updated || 0) + (counts.review || 0);
@@ -889,7 +941,10 @@ form.addEventListener('submit', async (event) => {
   if (!text) return;
   setBusy(true, 'Searching, then reading business websites…');
   try {
-    handleResponse(await call('/command', { command: text, workbook: selected }));
+    handleResponse(await call('/command', {
+      command: text, workbook: selected,
+      businesses: _buffer.map((r) => ({ ...r })),
+    }));
   } catch (err) {
     showError(err.message);
     actionbar.hidden = true;
@@ -901,7 +956,10 @@ form.addEventListener('submit', async (event) => {
 saveBtn.addEventListener('click', async () => {
   setBusy(true, 'Writing to the workbook…');
   try {
-    reportSave(await call('/businesses/save', { workbook: selected }));
+    reportSave(await call('/businesses/save', {
+      workbook: selected,
+      businesses: _buffer.map((r) => ({ ...r })),
+    }));
   } catch (err) {
     showError(err.message);
   } finally {

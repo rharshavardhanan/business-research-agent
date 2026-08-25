@@ -1,8 +1,6 @@
 import pytest
-from openpyxl import load_workbook
 
-from app import workbooks
-from app.excel import COLUMNS
+from app.models import Business
 from app.workbooks import (
     InvalidPath,
     create_folder,
@@ -10,134 +8,102 @@ from app.workbooks import (
     delete_folder,
     delete_workbook,
     rename_or_move,
-    resolve_path,
     tree,
+    validate,
 )
-
-
-@pytest.fixture(autouse=True)
-def data_dir(tmp_path, monkeypatch):
-    monkeypatch.setattr(workbooks, "DATA_DIR", tmp_path)
-    return tmp_path
-
-
-# --- path safety (trust boundary) -----------------------------------------
 
 
 @pytest.mark.parametrize(
     "evil",
-    ["../../etc/passwd", "/etc/passwd", "a/../../b.xlsx", "../leads.db", "..", "", "   "],
+    ["../../etc/passwd", "/etc/passwd", "a/../../b.xlsx", "..", "", "   ",
+     "a//b.xlsx", "a/./b.xlsx", "x" * 300],
 )
-def test_traversal_and_absolute_paths_are_rejected(evil):
+def test_invalid_paths_are_rejected(evil):
     with pytest.raises(InvalidPath):
-        resolve_path(evil)
+        validate(evil)
 
 
-def test_non_xlsx_workbook_path_is_rejected():
-    with pytest.raises(InvalidPath):
-        resolve_path("notes.txt", require_xlsx=True)
+def test_validate_normalises_a_good_path():
+    assert validate("dental/chennai.xlsx", require_xlsx=True) == "dental/chennai.xlsx"
+    assert validate("  dental / chennai.xlsx  ") == "dental/chennai.xlsx"
 
 
-def test_the_database_is_not_a_valid_target():
-    with pytest.raises(InvalidPath):
-        resolve_path("leads.db")
+def test_require_xlsx_is_enforced():
+    with pytest.raises(InvalidPath, match=".xlsx"):
+        validate("notes.txt", require_xlsx=True)
 
 
-def test_trash_is_not_a_valid_target():
-    with pytest.raises(InvalidPath):
-        resolve_path(".trash/old.xlsx")
-
-
-def test_a_normal_path_resolves_inside_data_dir(data_dir):
-    got = resolve_path("dental/chennai.xlsx")
-    assert got == (data_dir / "dental" / "chennai.xlsx").resolve()
-    assert data_dir.resolve() in got.parents
-
-
-def test_symlink_escaping_data_dir_is_rejected(data_dir, tmp_path):
-    outside = tmp_path.parent / "outside_secret"
-    outside.mkdir(exist_ok=True)
-    (data_dir / "escape").symlink_to(outside, target_is_directory=True)
-    with pytest.raises(InvalidPath):
-        resolve_path("escape/secret.xlsx")
-
-
-def test_tree_lists_workbooks_and_folders(data_dir):
-    (data_dir / "businesses.xlsx").write_bytes(b"x")
-    (data_dir / "dental").mkdir()
-    (data_dir / "dental" / "chennai.xlsx").write_bytes(b"x")
-    (data_dir / "leads.db").write_bytes(b"x")
-    (data_dir / ".trash").mkdir()
-    (data_dir / ".trash" / "gone.xlsx").write_bytes(b"x")
-
-    t = tree()
-    names = [c["name"] for c in t["children"]]
-    assert "businesses.xlsx" in names
-    assert "dental" in names
-    assert "leads.db" not in names, "the database is not a workbook"
-    assert ".trash" not in names, "trash is never listed"
-
+def test_folders_are_path_prefixes_not_rows(store):
+    create_workbook(store, "dental/chennai.xlsx")
+    t = tree(store)
     dental = next(c for c in t["children"] if c["name"] == "dental")
     assert dental["type"] == "folder"
     assert [c["path"] for c in dental["children"]] == ["dental/chennai.xlsx"]
 
 
-# --- operations -----------------------------------------------------------
+def test_an_empty_folder_survives_as_a_marker_row(store):
+    create_folder(store, "empty")
+    assert [c["name"] for c in tree(store)["children"]] == ["empty"]
 
 
-def test_create_workbook_writes_a_formatted_empty_sheet(data_dir):
-    rel = create_workbook("dental/chennai.xlsx")
-    assert rel == "dental/chennai.xlsx"
-    ws = load_workbook(data_dir / "dental" / "chennai.xlsx")["Businesses"]
-    assert [c.value for c in ws[1]] == COLUMNS
-    assert ws.max_row == 1
-
-
-def test_create_workbook_refuses_to_clobber(data_dir):
-    create_workbook("a.xlsx")
+def test_create_refuses_to_clobber(store):
+    create_workbook(store, "a.xlsx")
     with pytest.raises(InvalidPath, match="already exists"):
-        create_workbook("a.xlsx")
+        create_workbook(store, "a.xlsx")
 
 
-def test_create_workbook_requires_xlsx():
-    with pytest.raises(InvalidPath):
-        create_workbook("notes.txt")
+def test_a_folder_may_not_end_in_xlsx(store):
+    with pytest.raises(InvalidPath, match=".xlsx"):
+        create_folder(store, "wrong.xlsx")
 
 
-def test_create_folder(data_dir):
-    assert create_folder("dental/south") == "dental/south"
-    assert (data_dir / "dental" / "south").is_dir()
+def test_rename_carries_the_rows_by_cascade(store):
+    create_workbook(store, "a.xlsx")
+    store.upsert_many([Business(business_name="ABC")], "a.xlsx")
+    assert rename_or_move(store, "a.xlsx", "dental/b.xlsx") == "dental/b.xlsx"
+    assert len(store.all("dental/b.xlsx")) == 1
+    assert len(store.all("a.xlsx")) == 0
 
 
-def test_rename_moves_the_file(data_dir):
-    create_workbook("a.xlsx")
-    assert rename_or_move("a.xlsx", "dental/b.xlsx") == "dental/b.xlsx"
-    assert not (data_dir / "a.xlsx").exists()
-    assert (data_dir / "dental" / "b.xlsx").exists()
+def test_renaming_a_folder_moves_what_is_inside_it(store):
+    create_folder(store, "old")
+    create_workbook(store, "old/a.xlsx")
+    store.upsert_many([Business(business_name="ABC")], "old/a.xlsx")
+    rename_or_move(store, "old", "new")
+    assert len(store.all("new/a.xlsx")) == 1
 
 
-def test_rename_refuses_to_overwrite(data_dir):
-    create_workbook("a.xlsx")
-    create_workbook("b.xlsx")
+def test_rename_refuses_to_overwrite(store):
+    create_workbook(store, "a.xlsx")
+    create_workbook(store, "b.xlsx")
     with pytest.raises(InvalidPath, match="already exists"):
-        rename_or_move("a.xlsx", "b.xlsx")
+        rename_or_move(store, "a.xlsx", "b.xlsx")
 
 
-def test_delete_workbook_moves_to_trash_never_unlinks(data_dir):
-    create_workbook("a.xlsx")
-    trashed = delete_workbook("a.xlsx")
-    assert not (data_dir / "a.xlsx").exists()
-    assert (data_dir / ".trash" / trashed).exists(), "the spreadsheet is the backup"
+def test_delete_workbook_soft_deletes_its_rows(store):
+    create_workbook(store, "a.xlsx")
+    store.upsert_many([Business(business_name="ABC")], "a.xlsx")
+    assert delete_workbook(store, "a.xlsx") == 1
+    assert store.all("a.xlsx") == []
+    assert "a.xlsx" not in [c["path"] for c in tree(store)["children"]]
+    assert store.count_deleted() == 1, "hidden, not destroyed"
 
 
-def test_delete_empty_folder(data_dir):
-    create_folder("empty")
-    delete_folder("empty")
-    assert not (data_dir / "empty").exists()
+def test_delete_empty_folder(store):
+    create_folder(store, "empty")
+    delete_folder(store, "empty")
+    assert tree(store)["children"] == []
 
 
-def test_delete_non_empty_folder_is_refused(data_dir):
-    create_workbook("dental/chennai.xlsx")
+def test_delete_non_empty_folder_is_refused(store):
+    create_workbook(store, "dental/chennai.xlsx")
+    create_folder(store, "dental")
     with pytest.raises(InvalidPath, match="not empty"):
-        delete_folder("dental")
-    assert (data_dir / "dental" / "chennai.xlsx").exists()
+        delete_folder(store, "dental")
+    assert len(store.all("dental/chennai.xlsx")) == 0
+    assert "dental" in [c["name"] for c in tree(store)["children"]]
+
+
+def test_deleting_a_missing_path_is_refused(store):
+    with pytest.raises(InvalidPath, match="does not exist"):
+        delete_workbook(store, "nope.xlsx")

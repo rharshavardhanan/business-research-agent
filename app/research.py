@@ -1,4 +1,4 @@
-"""The pipeline: search -> normalize -> enrich -> tag against the store.
+"""The pipeline: search -> normalize -> tag against the store.
 
 This function deliberately WRITES NOTHING. It returns results tagged against
 what is already stored so the user can review them before committing. Persisting
@@ -10,7 +10,6 @@ import logging
 from dataclasses import dataclass
 
 from app.dedupe import find_match, merge
-from app.enrichment import enrich_all
 from app.models import Business, Command, MatchTag
 from app.normalize import normalize_phone, normalize_url
 from app.providers import get_provider
@@ -53,11 +52,10 @@ async def research(
         len(raw),
     )
 
-    normalized = [_normalize(b) for b in raw]
-
-    with_sites = sum(1 for b in normalized if b.website)
-    enriched = await enrich_all(normalized)
-    log.info("enrichment: %d of %d had a website", with_sites, len(enriched))
+    # Enrichment is no longer done here. The browser calls /enrich once per
+    # business, so results appear immediately and no single request has to fit
+    # a 5-page crawl inside a serverless function timeout.
+    enriched = [_normalize(b) for b in raw]
 
     known = store.all(workbook)
     batch: list[Business] = []

@@ -12,7 +12,7 @@ Find dental clinics in Kodambakkam
 contacts → deduplicates against what you've already saved → shows you everything
 **before** a single row is written.
 
-<sub>Python 3.12 · FastAPI · SQLite · openpyxl · Google Places / OpenStreetMap · Gemini · 220 tests</sub>
+<sub>Python 3.12 · FastAPI · Postgres · openpyxl · Google Places / OpenStreetMap · Gemini · 218 tests</sub>
 
 ---
 
@@ -58,9 +58,14 @@ Every value the app didn't get from a provider carries the URL it came from.
 ## Quick start
 
 ```bash
-git clone https://github.com/<you>/business-research-agent.git
+git clone https://github.com/rharshavardhanan/business-research-agent.git
 cd business-research-agent
 uv sync
+
+# Postgres — any instance will do; this is the one the tests use.
+docker run -d --name bra-pg -e POSTGRES_PASSWORD=test -e POSTGRES_DB=bra \
+  -p 55432:5432 postgres:16-alpine
+
 cp .env.example .env          # add your Gemini key
 uv run uvicorn app.main:app --reload
 ```
@@ -76,7 +81,7 @@ Open <http://localhost:8000>.
 | `SEARCH_PROVIDER` | No | `osm` (default) or `google_places` |
 | `GOOGLE_PLACES_API_KEY` | For Google | Requires **Places API (New)** enabled and billing on the project |
 | `APP_PASSWORD` | For deployment | Blank locally. Set it before exposing the app to a network |
-| `DATA_DIR` | No | Defaults to `data/` |
+| `DATABASE_URL` | **Yes** | Postgres connection string. Free tier at [neon.tech](https://neon.tech) |
 
 ---
 
@@ -121,14 +126,14 @@ parser.py ──── Gemini ──→ Command{action, business_type, location,
      │                  ↓
      │             tagged NEW/EXISTING/UPDATED/REVIEW ──→ buffer ──→ UI
      │
-     └─ store ───→ store.py (SQLite upsert) ──→ excel.py (workbook re-render)
+     └─ store ───→ store.py (Postgres upsert)
 ```
 
-**SQLite is the source of truth. The `.xlsx` is a rendered view of it.**
+**Postgres is the source of truth. The `.xlsx` is generated from it on demand.**
 
 That single decision explains most of the design: edits write to the database and
-the sheet is re-rendered, never edited in place; renaming a workbook carries its
-rows; deleting one drops them. The two can't drift apart.
+any download reflects them immediately; renaming a workbook carries its rows via
+a foreign-key cascade; deleting one hides them. There is no second copy to drift.
 
 `research()` deliberately **writes nothing** — results are buffered and persisted
 only when you say so. That review gap is the product.
@@ -143,9 +148,9 @@ only when you say so. That review gap is the product.
 | `enrichment.py` | Fetch and parse business websites |
 | `normalize.py` | Canonical forms for everything compared |
 | `dedupe.py` | Match hierarchy and merge policy |
-| `store.py` | SQLite: schema, migration, upsert, row edits |
-| `excel.py` | Workbook render, in-place sync, read-back |
-| `workbooks.py` | Filesystem: tree, create, rename, delete, **path validation** |
+| `store.py` | Postgres: schema, upsert, row edits, soft delete |
+| `excel.py` | Workbook rendering, in memory |
+| `workbooks.py` | Workbook rows: tree, create, rename, delete, path validation |
 | `research.py` | The pipeline |
 | `main.py` | Routes, auth, result buffer |
 
@@ -179,54 +184,71 @@ legitimate separate row there.
 
 ---
 
-## Deployment
+## Deployment — Vercel + Neon
 
-The app writes SQLite and `.xlsx` files to disk and runs a search for up to two
-minutes. It needs **a persistent disk and no function timeout**.
+Both have free tiers that cover this app, and together they cost nothing.
 
-### It will not run on Vercel
+**1. Database.** Create a project at [neon.tech](https://neon.tech) and copy the
+**pooled** connection string.
 
-Not a configuration problem — a mismatch. Serverless filesystems are ephemeral, so
-the database and every workbook are lost between invocations; the in-memory result
-buffer doesn't survive to the save request; and enrichment exceeds the function
-timeout. Running it there means replacing SQLite with Postgres, workbooks with
-blob storage, and enrichment with a queue.
+**2. Deploy.** Import the repo at [vercel.com/new](https://vercel.com/new).
+`vercel.json` routes every path to the ASGI app in `api/index.py`, so one
+function serves the API and the UI.
 
-### Railway or Render
+**3. Environment variables** in the Vercel dashboard:
 
-```bash
-# Railway
-railway up          # railway.toml is included
-
-# Render
-# render.yaml is included — connect the repo and deploy
+```
+DATABASE_URL=postgresql://...neon.tech/neondb?sslmode=require
+GEMINI_API_KEY=...
+GOOGLE_PLACES_API_KEY=...
+SEARCH_PROVIDER=google_places
+APP_PASSWORD=...
 ```
 
-Both need:
+**4. Bring your data across** (optional):
 
-1. **A volume mounted at `/data`.** Without it, every redeploy starts empty.
-2. `GEMINI_API_KEY`, `GOOGLE_PLACES_API_KEY`, `SEARCH_PROVIDER`
-3. **`APP_PASSWORD`** — see below.
+```bash
+uv run python scripts/migrate_sqlite_to_postgres.py \
+    --source data/leads.db --dsn "$DATABASE_URL"
+```
 
-A `Dockerfile` is included and builds from the committed lockfile.
+It reports per-workbook counts and refuses to run twice against a non-empty
+database without `--force`.
 
-### Set a password before you expose it
+### Set a password
 
-There is no per-user auth. Setting `APP_PASSWORD` puts HTTP Basic in front of
-every route, including the UI. Without it, anyone with the URL can spend your
-Google and Gemini quota and read, edit or delete your leads.
+There is no per-user auth. `APP_PASSWORD` puts HTTP Basic in front of every
+route, including the UI. A Vercel URL is public by default, and every route
+spends billable Google and Gemini quota. Leave it blank locally, where a
+password is friction with no benefit.
 
-Blank locally — a password on `localhost` is friction with no benefit.
+### What being serverless costs
 
----
+There is no disk, which shapes three things:
+
+- **The `.xlsx` is generated at download**, never stored. You can download a
+  workbook, but rows typed into that file cannot be read back — edit in the app's
+  grid instead, which does everything the sheet does.
+- **The browser holds unsaved search results.** A refresh loses them. Nothing
+  already saved is ever at risk.
+- **Enrichment runs one request per business**, driven by the page. Results
+  appear immediately and detail fills in as it arrives, rather than one long
+  request that no function timeout would allow.
+
+Deleting is soft: a `deleted_at` column hides rows rather than destroying them.
+
 
 ## Tests
 
 ```bash
-uv run pytest          # 220 tests, no network
+uv run pytest          # 218 tests, no network
 ```
 
-Nothing in the suite touches the network: providers and enrichment are exercised
+Tests run against a **real Postgres**, each in its own throwaway schema — not
+SQLite standing in for it, which would prove nothing about the database actually
+in production.
+
+Nothing in the suite touches the internet: providers and enrichment are exercised
 against fixtures, and the Gemini client is stubbed — including deleting
 `GEMINI_API_KEY` from the environment so a real key can't send a test to the live
 API and burn free-tier quota.
@@ -240,17 +262,16 @@ API and burn free-tier quota.
 | `test_providers` | Both providers, radius parsing, error passthrough |
 | `test_enrichment` | Extraction, page selection, time bounds |
 | `test_parser` | Command schema, error mapping, summary prompt |
-| `test_workbooks` | **Path traversal**, tree, create/rename/delete |
+| `test_workbooks` | Path validation, tree, create/rename/delete |
 | `test_api` | Every endpoint |
 | `test_auth` | The password gate |
 
-### Path safety
+### Path validation
 
-`workbooks.resolve_path` is a trust boundary: `/workbooks/download` streams
-whatever it returns, so without it the endpoint would serve any file the process
-can read. It rejects absolute paths, `..` traversal, symlinks escaping `data/`,
-non-`.xlsx` workbook paths, and the reserved `leads.db` and `.trash` names — each
-with its own test.
+Workbook paths are database keys, not filesystem paths — folders are prefixes,
+not directories. `workbooks.validate` still rejects absolute paths, `..`, empty
+segments and unexpected characters, because a malformed key is one nobody can
+address. Each rule has its own test.
 
 ---
 
